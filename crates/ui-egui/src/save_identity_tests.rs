@@ -37,12 +37,12 @@ fn account_open_adopts_the_decoded_project_once_and_never_opens_invalid_bytes() 
     let bytes = photocraft_format::save_to_bytes(original, &Default::default()).unwrap();
     let mut editor =
         PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
-    assert!(editor.start_account_document(Some(("Pictures/Broken.pcraft", b"broken"))).is_err());
-    assert!(editor.start_account_document(Some(("../Outside.pcraft", &bytes))).is_err());
+    assert!(editor.start_account_document(Some(("Pictures/Broken.pcraft", b"broken")), None).is_err());
+    assert!(editor.start_account_document(Some(("../Outside.pcraft", &bytes)), None).is_err());
     assert!(editor.session.documents().is_empty());
 
     let path = "Pictures/Copy.pcraft";
-    let (id, revision) = editor.start_account_document(Some((path, &bytes))).unwrap();
+    let (id, revision) = editor.start_account_document(Some((path, &bytes)), None).unwrap();
     let live = editor.session.active().unwrap();
     assert_eq!(live.path.as_deref(), Some(path));
     assert_eq!(live.doc.id, id);
@@ -51,7 +51,7 @@ fn account_open_adopts_the_decoded_project_once_and_never_opens_invalid_bytes() 
     assert_eq!(live.doc.layers.len(), original.layers.len());
     assert_eq!(live.doc.size, original.size);
     assert!(!live.is_dirty());
-    assert!(editor.start_account_document(None).is_err());
+    assert!(editor.start_account_document(None, None).is_err());
     assert_eq!(editor.session.documents().len(), 1);
 }
 
@@ -59,11 +59,12 @@ fn account_open_adopts_the_decoded_project_once_and_never_opens_invalid_bytes() 
 fn account_open_creates_a_clean_untitled_document_through_file_new() {
     let mut editor =
         PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
-    let (id, revision) = editor.start_account_document(None).unwrap();
+    let (id, revision) = editor.start_account_document(None, Some(json!({"width": 32, "height": 24}))).unwrap();
     let live = editor.session.active().unwrap();
     assert_eq!(live.doc.id, id);
     assert_eq!(live.revision, revision);
     assert!(live.path.is_none());
+    assert_eq!(live.doc.size, photocraft_geom::Size::new(32, 24));
     assert!(!editor.has_unsaved_work());
 }
 

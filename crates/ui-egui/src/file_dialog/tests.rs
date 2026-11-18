@@ -55,6 +55,15 @@ fn account_project_commands_use_the_host_dialog_and_leave_local_exports_alone() 
     app.poll_file_dialog(&ctx, None);
     assert_eq!(app.session.documents().len(), 1);
 
+    let new_settings = json!({"width": 35, "height": 24});
+    menus::invoke(&mut app, &ctx, "file.new", new_settings.clone()).unwrap();
+    app.poll_file_dialog(&ctx, None);
+    let (new, reply) = dialogs.borrow_mut().pop().unwrap();
+    assert!(matches!(new, AccountDialogRequest::New { settings } if settings == new_settings));
+    reply.send(None);
+    app.poll_file_dialog(&ctx, None);
+    assert_eq!(app.session.documents().len(), 1);
+
     menus::invoke(&mut app, &ctx, "file.saveAs", json!({})).unwrap();
     app.poll_file_dialog(&ctx, None);
     let (save, reply) = dialogs.borrow_mut().pop().unwrap();

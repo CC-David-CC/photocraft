@@ -68,6 +68,7 @@ fn fields(object: &Object, request: &AccountSaveRequest) -> Result<(), String> {
 struct StartRequest {
     id: String,
     project: Option<(String, ArrayBuffer)>,
+    new_settings: Option<serde_json::Value>,
 }
 
 impl StartRequest {
@@ -86,7 +87,15 @@ impl StartRequest {
             }
             Some((path, bytes))
         };
-        Some(Self { id, project })
+        let settings = field(packet, "newSettings")?;
+        let new_settings = if settings.is_null() || settings.is_undefined() {
+            None
+        } else {
+            let settings = settings.as_string().filter(|settings| settings.len() <= 4096)?;
+            let value: serde_json::Value = serde_json::from_str(&settings).ok()?;
+            Some(value.is_object().then_some(value)?)
+        };
+        Some(Self { id, project, new_settings })
     }
 }
 
@@ -233,9 +242,9 @@ impl AccountHost {
         let opened = if let Some((name, buffer)) = start.project {
             let bytes = Uint8Array::new(buffer.as_ref()).to_vec();
             path = Some(name);
-            app.start_account_document(path.as_deref().map(|name| (name, bytes.as_slice())))
+            app.start_account_document(path.as_deref().map(|name| (name, bytes.as_slice())), start.new_settings)
         } else {
-            app.start_account_document(None)
+            app.start_account_document(None, start.new_settings)
         };
         let message = packet("photocraft:account-started")?;
         put(&message, "requestId", start.id)?;
@@ -279,6 +288,11 @@ fn send_dialog(exchange: &RefCell<Exchange>, parent: &Parent, request: AccountDi
     let message = packet("photocraft:account-dialog")?;
     put(&message, "requestId", id.to_string())?;
     let save = match request {
+        AccountDialogRequest::New { settings } => {
+            put(&message, "operation", "new")?;
+            put(&message, "settings", settings.to_string())?;
+            false
+        }
         AccountDialogRequest::Open { path } => {
             put(&message, "operation", "open")?;
             put(&message, "path", path.map_or(JsValue::NULL, JsValue::from))?;

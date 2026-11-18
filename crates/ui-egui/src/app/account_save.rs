@@ -50,11 +50,14 @@ impl AccountSaveState {
 impl PhotocraftApp {
     /// Start the initial account view with a native blank or a saved project.
     /// An account path represents a Storage resource and never a local path.
-    pub fn start_account_document(&mut self, project: Option<(&str, &[u8])>) -> Result<(DocId, u64), String> {
+    pub fn start_account_document(&mut self, project: Option<(&str, &[u8])>, new_settings: Option<serde_json::Value>) -> Result<(DocId, u64), String> {
         if self.services.account_save.is_none() || !self.session.documents().is_empty() {
             return Err("Start requires an empty account editor".into());
         }
         if let Some((path, bytes)) = project {
+            if new_settings.is_some() {
+                return Err("New project settings require an untitled document".into());
+            }
             validate_path(path)?;
             let mut doc = photocraft_format::load_from_bytes(bytes).map_err(|error| error.to_string())?;
             let name = crate::file_open::display_name(path);
@@ -68,7 +71,10 @@ impl PhotocraftApp {
             self.ui.status_error = false;
             crate::notices::io_warnings(self, &status, &warnings);
         } else {
-            self.run("file.new", serde_json::json!({}))?;
+            self.run("file.new", new_settings.unwrap_or_else(|| serde_json::json!({})))?;
+            if let Some(index) = self.session.active_index() {
+                self.ui.views[index].fit_pending = true;
+            }
         }
         let state = self.session.active().ok_or("PhotoCraft did not open a document")?;
         Ok((state.doc.id, state.revision))

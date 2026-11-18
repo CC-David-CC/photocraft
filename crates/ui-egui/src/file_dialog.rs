@@ -35,6 +35,7 @@ pub enum FileDialogRequest {
 
 pub enum AccountDialogRequest {
     Open { path: Option<String> },
+    New { settings: Value },
     Save { suggested: String },
 }
 
@@ -338,6 +339,13 @@ impl PhotocraftApp {
     pub(crate) fn open_account_project(&mut self, path: Option<&str>) -> Result<Value, String> {
         let request = AccountDialogRequest::Open { path: path.map(str::to_owned) };
         self.ask_dialog(DialogRequest::Account(request), "open", |_, _| Ok(Value::Null))
+    }
+
+    pub(crate) fn create_project(&mut self, settings: Value) -> Result<Value, String> {
+        if self.services.account_dialog.is_none() {
+            return self.run("file.new", settings);
+        }
+        self.ask_dialog(DialogRequest::Account(AccountDialogRequest::New { settings }), "new", |_, _| Ok(Value::Null))
     }
 
     /// File › Open as Smart Object…: the File › Open dialog (same filters, several files); each

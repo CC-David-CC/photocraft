@@ -1206,8 +1206,8 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
     let d = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
     match d.kind {
         DialogKind::NewDocument => {
-            let r = app.run("file.new", crate::new_doc_ui::command_params(&d.fields));
-            if let Some(i) = app.session.active_index() {
+            let r = app.create_project(crate::new_doc_ui::command_params(&d.fields));
+            if app.services.account_dialog.is_none() && let Some(i) = app.session.active_index() {
                 app.ui.views[i].fit_pending = true;
             }
             if r.is_ok() {
