@@ -3,6 +3,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
+use photocraft_doc::DocId;
 use photocraft_ui_egui::{AccountDialogFn, AccountDialogRequest, AccountSaveFn, AccountSaveRequest, FileDialogAnswer, FileDialogReply, PhotocraftApp};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use web_sys::{MessageEvent, Window};
@@ -58,6 +59,10 @@ fn field(value: &JsValue, name: &str) -> Option<JsValue> {
     Reflect::get(value, &JsValue::from_str(name)).ok()
 }
 
+fn request_id(value: &JsValue) -> Option<String> {
+    text(value, "requestId").filter(|id| id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+}
+
 fn fields(object: &Object, request: &AccountSaveRequest) -> Result<(), String> {
     put(object, "ticket", request.ticket.to_string())?;
     put(object, "documentId", request.document.0.to_string())?;
@@ -67,19 +72,25 @@ fn fields(object: &Object, request: &AccountSaveRequest) -> Result<(), String> {
 
 struct StartRequest {
     id: String,
-    project: Option<(String, ArrayBuffer)>,
+    project: Option<(Option<String>, ArrayBuffer)>,
     new_settings: Option<serde_json::Value>,
+    recover: bool,
 }
 
 impl StartRequest {
     fn read(packet: &JsValue) -> Option<Self> {
-        let id = text(packet, "requestId").filter(|id| id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))?;
+        let id = request_id(packet)?;
+        let recover = field(packet, "recover").and_then(|value| value.as_bool()).unwrap_or(false);
         let path = field(packet, "path")?;
         let bytes = field(packet, "bytes")?;
-        let project = if path.is_null() && bytes.is_null() {
+        let project = if !recover && path.is_null() && bytes.is_null() {
             None
         } else {
-            let path = path.as_string().filter(|path| !path.is_empty() && path.len() <= 2048)?;
+            let path = if recover && path.is_null() {
+                None
+            } else {
+                Some(path.as_string().filter(|path| !path.is_empty() && path.len() <= 2048)?)
+            };
             let bytes = bytes.dyn_into::<ArrayBuffer>().ok()?;
             let length = bytes.byte_length() as usize;
             if !(1..=MAX_PROJECT_BYTES).contains(&length) {
@@ -95,7 +106,10 @@ impl StartRequest {
             let value: serde_json::Value = serde_json::from_str(&settings).ok()?;
             Some(value.is_object().then_some(value)?)
         };
-        Some(Self { id, project, new_settings })
+        if recover && new_settings.is_some() {
+            return None;
+        }
+        Some(Self { id, project, new_settings, recover })
     }
 }
 
@@ -110,6 +124,23 @@ struct Exchange {
     save_uncertain: bool,
     close: Option<CloseRequest>,
     close_approved: bool,
+    recovery: Option<RecoveryRequest>,
+}
+
+struct RecoveryRequest {
+    id: String,
+    document: DocId,
+    revision: u64,
+}
+
+impl RecoveryRequest {
+    fn read(packet: &JsValue) -> Option<Self> {
+        Some(Self {
+            id: request_id(packet)?,
+            document: DocId(text(packet, "documentId")?.parse().ok()?),
+            revision: text(packet, "revision")?.parse().ok()?,
+        })
+    }
 }
 
 struct CloseRequest {
@@ -186,11 +217,20 @@ impl AccountHost {
                 }
                 Some("photocraft:account-close") => {
                     if inbox.started && inbox.close.is_none() && !inbox.close_approved
-                        && let Some(id) = text(&data, "requestId").filter(|id| id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+                        && let Some(id) = request_id(&data)
                         && let Some(interactive) = field(&data, "interactive").and_then(|value| value.as_bool())
                     {
                         inbox.close = Some(CloseRequest { id, interactive, started: false });
                         wake.request_repaint();
+                    }
+                    return;
+                }
+                Some("photocraft:account-recovery-capture") => {
+                    if inbox.started && !inbox.close_approved && inbox.recovery.is_none() {
+                        inbox.recovery = RecoveryRequest::read(&data);
+                        if inbox.recovery.is_some() {
+                            wake.request_repaint();
+                        }
                     }
                     return;
                 }
@@ -307,8 +347,12 @@ impl AccountHost {
         let mut path = None;
         let opened = if let Some((name, buffer)) = start.project {
             let bytes = Uint8Array::new(buffer.as_ref()).to_vec();
-            path = Some(name);
-            app.start_account_document(path.as_deref().map(|name| (name, bytes.as_slice())), start.new_settings)
+            path = name;
+            if start.recover {
+                app.start_account_recovery(path.as_deref(), &bytes)
+            } else {
+                app.start_account_document(path.as_deref().map(|name| (name, bytes.as_slice())), start.new_settings)
+            }
         } else {
             app.start_account_document(None, start.new_settings)
         };
@@ -325,6 +369,25 @@ impl AccountHost {
             Err(error) => put(&message, "message", error)?,
         }
         self.parent.send(&message, &Array::new())
+    }
+
+    pub fn apply_recovery_capture(&self, app: &PhotocraftApp) -> Result<(), String> {
+        let Some(request) = self.exchange.borrow_mut().recovery.take() else { return Ok(()) };
+        let message = packet("photocraft:account-recovery-captured")?;
+        put(&message, "requestId", request.id)?;
+        put(&message, "documentId", request.document.0.to_string())?;
+        put(&message, "revision", request.revision.to_string())?;
+        let transfer = Array::new();
+        match app.capture_account_recovery(request.document, request.revision) {
+            Ok(bytes) if bytes.len() <= MAX_PROJECT_BYTES => {
+                let buffer = Uint8Array::from(bytes.as_slice()).buffer();
+                put(&message, "bytes", buffer.clone())?;
+                transfer.push(buffer.as_ref());
+            }
+            Ok(_) => put(&message, "message", "This PhotoCraft recovery snapshot exceeds the browser recovery limit")?,
+            Err(error) => put(&message, "message", error)?,
+        }
+        self.parent.send(&message, &transfer)
     }
 
     pub fn apply_save_result(&self, app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {

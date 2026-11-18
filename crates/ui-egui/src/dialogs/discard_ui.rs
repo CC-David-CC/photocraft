@@ -157,12 +157,13 @@ impl PhotocraftApp {
         Ok(())
     }
 
-    fn account_edit_in_progress(&self) -> bool {
+    pub(crate) fn account_edit_in_progress(&self) -> bool {
         self.drag.is_some()
             || self.live_stroke.is_some()
             || self.ui.text_edit.is_some()
             || self.type_box_preview.is_some()
             || self.type_transform_preview.is_some()
+            || self.session.documents().iter().any(|state| state.floating.is_some())
             || self.transform_preparing.is_some()
             || self.transform_preview.is_some()
             || !self.remove_pending.is_empty()

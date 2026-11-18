@@ -493,6 +493,11 @@ impl eframe::App for WebShell {
         if self.closing(ctx) {
             return;
         }
+        if let Some(host) = self.host.as_ref()
+            && let Err(error) = host.apply_recovery_capture(&self.app)
+        {
+            log::warn!("PhotoCraft could not report its account recovery snapshot: {error}");
+        }
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         if !dropped.is_empty() {
             let names: Vec<String> =

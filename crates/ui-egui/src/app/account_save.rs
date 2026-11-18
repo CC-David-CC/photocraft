@@ -81,6 +81,47 @@ impl PhotocraftApp {
         Ok((state.doc.id, state.revision))
     }
 
+    /// Encode a browser-local recovery snapshot without saving the editor or
+    /// acknowledging any server write. The caller owns the base Storage revision.
+    pub fn capture_account_recovery(&self, document: DocId, revision: u64) -> Result<Vec<u8>, String> {
+        if self.services.account_save.is_none() || self.session.documents().len() != 1 {
+            return Err("PhotoCraft recovery needs one account document".into());
+        }
+        let state = self.session.active().filter(|st| st.doc.id == document && st.revision == revision && st.is_dirty())
+            .ok_or("The PhotoCraft recovery revision is no longer current")?;
+        if self.account_edit_in_progress() {
+            return Err("A PhotoCraft edit is still in progress".into());
+        }
+        photocraft_format::save_to_bytes(&state.doc, &Default::default()).map_err(|error| error.to_string())
+    }
+
+    /// Recover a native snapshot as unsaved work. The browser supplies a path
+    /// only when it can keep the exact account binding under a conditional save.
+    pub fn start_account_recovery(&mut self, path: Option<&str>, bytes: &[u8]) -> Result<(DocId, u64), String> {
+        if self.services.account_save.is_none() || !self.session.documents().is_empty() {
+            return Err("Recovery requires an empty account editor".into());
+        }
+        if let Some(path) = path {
+            validate_path(path)?;
+        }
+        let mut doc = photocraft_format::load_from_bytes(bytes).map_err(|error| error.to_string())?;
+        if let Some(path) = path {
+            doc.name = crate::file_open::display_name(path);
+        }
+        let warnings = crate::file_open::with_missing_fonts_of(&doc, photocraft_io::open_warnings(&doc));
+        let index = self.session.add_document(doc, path.map(str::to_owned));
+        let state = self.session.active_mut().ok_or("PhotoCraft did not restore the project")?;
+        state.saved_revision = 0;
+        let admitted = (state.doc.id, state.revision);
+        self.sync_views();
+        self.ui.views[index].fit_pending = true;
+        let status = "Recovered PhotoCraft project from this browser";
+        self.ui.status = status.into();
+        self.ui.status_error = false;
+        crate::notices::io_warnings(self, status, &warnings);
+        Ok(admitted)
+    }
+
     pub(super) fn submit_account_save(&mut self, path: String, bytes: Vec<u8>, warnings: Vec<String>) -> Result<(), String> {
         if self.account_save.pending.is_some() {
             return Err("An account save is awaiting a result".into());

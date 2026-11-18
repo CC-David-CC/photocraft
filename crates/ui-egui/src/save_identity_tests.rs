@@ -69,6 +69,57 @@ fn account_open_creates_a_clean_untitled_document_through_file_new() {
 }
 
 #[test]
+fn account_recovery_round_trips_layers_as_unsaved_without_changing_the_live_editor() {
+    let mut source = app();
+    source.services.account_save = Some(Box::new(|_, _| panic!("recovery must not save to the account")));
+    let before = identity(&source);
+    let live = source.session.active().unwrap();
+    let (document, revision, size, layers) = (live.doc.id, live.revision, live.doc.size, live.doc.layers.len());
+    assert!(source.capture_account_recovery(document, revision - 1).is_err());
+    let bytes = source.capture_account_recovery(document, revision).unwrap();
+    assert_eq!(identity(&source), before);
+
+    for path in [None, Some("Pictures/Layered.pcraft")] {
+        let mut recovered =
+            PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
+        assert!(recovered.start_account_recovery(path, b"invalid").is_err());
+        assert!(recovered.start_account_recovery(Some("../wrong.pcraft"), &bytes).is_err());
+        assert!(recovered.session.documents().is_empty());
+        let admitted = recovered.start_account_recovery(path, &bytes).unwrap();
+        let active = recovered.session.active().unwrap();
+        assert_eq!(admitted, (active.doc.id, active.revision));
+        assert_eq!(active.doc.size, size);
+        assert_eq!(active.doc.layers.len(), layers);
+        assert_eq!(active.path.as_deref(), path);
+        assert!(active.is_dirty());
+        assert!(recovered.start_account_recovery(None, &bytes).is_err());
+    }
+}
+
+#[test]
+fn account_recovery_preserves_the_previous_snapshot_during_a_live_type_edit() {
+    let mut source = app();
+    source.services.account_save = Some(Box::new(|_, _| Ok(())));
+    let state = source.session.active().unwrap();
+    let (document, revision) = (state.doc.id, state.revision);
+    source.ui.text_edit = Some(crate::state::TextEdit {
+        layer: state.active_layer.unwrap().0,
+        document: Some(document.0),
+        caret: 0,
+        anchor: 0,
+        session: "pending-type".into(),
+        created: false,
+        mask: false,
+        dragging: false,
+        resize: None,
+        preedit: Some((0, 1)),
+    });
+    assert!(source.capture_account_recovery(document, revision).is_err());
+    assert_eq!(source.ui.text_edit.as_ref().unwrap().preedit, Some((0, 1)));
+    assert_eq!(source.session.active().unwrap().revision, revision);
+}
+
+#[test]
 fn account_save_captures_real_layered_bytes_and_adopts_only_the_confirmed_revision() {
     let mut app = app();
     let out = Rc::new(RefCell::new(None));
