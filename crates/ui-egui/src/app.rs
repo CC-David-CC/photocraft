@@ -9,6 +9,7 @@ use super::{
     view_cmds, wheel_nav, wide_angle_ui, widgets, work_area, workspace_ui,
 };
 
+pub(crate) mod account_save;
 mod clipboard;
 mod commands;
 mod control;
@@ -214,6 +215,7 @@ impl PhotocraftApp {
             tiff_options: None,
             tiff_remembered: Default::default(),
             save_dirs: HashMap::new(),
+            account_save: Default::default(),
             disk_stamps: HashMap::new(),
             targa_options: None,
             jpeg_options: None,

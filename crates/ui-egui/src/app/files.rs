@@ -243,6 +243,10 @@ impl PhotocraftApp {
                 || (flat && photocraft_formats::from_extension(&e).is_some_and(|f| f.capabilities().write == photocraft_formats::Availability::Available))
         });
         let suggested = match &st.path {
+            path if self.services.account_save.is_some() => {
+                let source = path.as_deref().unwrap_or(&st.doc.name);
+                std::path::Path::new(source).with_extension(photocraft_format::EXTENSION).to_string_lossy().into_owned()
+            }
             Some(p) if transparent_jpeg => std::path::Path::new(p).with_extension("png").to_string_lossy().into_owned(),
             Some(p) if writable => p.clone(),
             p => {
@@ -573,6 +577,7 @@ impl PhotocraftApp {
         let settings = choices.apply(ExportSettings { tiff_layers: tiff_layers.unwrap_or(ExportSettings::default().tiff_layers), ..self.save_settings() });
         match self.write_document(path.clone(), &settings, copy)? {
             Some((path, warnings)) => Ok(serde_json::json!({"path": path, "warnings": warnings})),
+            None if self.account_save.request().is_some() => Ok(json!({"path": path, "warnings": [], "pending": true})),
             None => Ok(serde_json::json!({"path": path, "warnings": [], "pending": true, "job": self.jobs.last_started.map(|j| j.0)})),
         }
     }
@@ -583,7 +588,15 @@ impl PhotocraftApp {
     /// `None` when the save went to a background job (#2017), which finishes it in
     /// [`jobs_ui::tick`].
     pub(crate) fn write_document(&mut self, path: String, settings: &ExportSettings, copy: bool) -> Result<Option<(String, Vec<String>)>, String> {
+        let account_write = self.services.account_save.is_some() && !copy;
+        if account_write {
+            if self.account_save.request().is_some() {
+                return Err("An account save is awaiting a result".into());
+            }
+            super::account_save::validate_path(&path)?;
+        }
         if self.background_jobs
+            && !account_write
             && let Some(save) = self.services.save_file.clone()
         {
             // `start_save` checks the memory itself: other callers reach it directly.
@@ -594,6 +607,10 @@ impl PhotocraftApp {
         let (doc, written, previous) = (st.doc.id, st.revision, st.saved_revision);
         let export = self.services.export.as_ref().ok_or("no exporter configured")?;
         let (bytes, warnings) = export(&st.doc, &path, settings)?;
+        if account_write {
+            self.submit_account_save(path, bytes, warnings)?;
+            return Ok(None);
+        }
         let write = self.services.write.as_mut().ok_or("no writer configured")?;
         write(&path, &bytes)?;
         let revision = saved_revision_after_write(!self.services.write_unconfirmed, written, previous);
@@ -797,7 +814,7 @@ impl PhotocraftApp {
 
     /// A save is running in the background.
     pub(crate) fn saving(&self) -> bool {
-        !self.jobs.saves.is_empty()
+        !self.jobs.saves.is_empty() || self.account_save.request().is_some()
     }
 
     /// Save through the control session's capability-scoped writer. No file

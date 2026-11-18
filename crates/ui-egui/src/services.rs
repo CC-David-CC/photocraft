@@ -544,6 +544,8 @@ pub type LastUpdateFn = fn() -> Option<Result<String, String>>;
 /// I/O dependencies.
 #[derive(Default)]
 pub struct Services {
+    /// Hand off encoded account project bytes and wait for a durable result.
+    pub account_save: Option<crate::AccountSaveFn>,
     /// Explicit interactive SVG smart-object editing; unavailable in browser and automation.
     pub open_external_svg: Option<OpenExternalSvgFn>,
     /// User-initiated desktop/browser pixel sampling.

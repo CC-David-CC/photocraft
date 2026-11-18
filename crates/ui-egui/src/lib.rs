@@ -76,6 +76,7 @@ pub use file_open::OsEvent;
 pub use state::{Tool, UiState};
 
 mod app;
+pub use app::account_save::{AccountSaveFn, AccountSaveRequest};
 mod input;
 mod prefs;
 mod services;
@@ -739,6 +740,7 @@ pub struct PhotocraftApp {
     /// Where each document was last saved or exported to through a dialog (#1826): its next Save
     /// As or export dialog starts there rather than beside the document. Session-only.
     pub(crate) save_dirs: HashMap<photocraft_doc::DocId, std::path::PathBuf>,
+    pub(crate) account_save: app::account_save::AccountSaveState,
     /// Each document's own file as it was when the document was opened from it or saved to it
     /// (see [`FileStamp`]).
     pub(crate) disk_stamps: HashMap<photocraft_doc::DocId, (String, FileStamp)>,

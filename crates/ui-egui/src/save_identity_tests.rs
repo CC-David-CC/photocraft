@@ -31,6 +31,112 @@ fn identity(app: &PhotocraftApp) -> (String, Option<String>, u64, u64) {
 }
 
 #[test]
+fn account_open_adopts_the_decoded_project_once_and_never_opens_invalid_bytes() {
+    let source = app();
+    let original = &source.session.active().unwrap().doc;
+    let bytes = photocraft_format::save_to_bytes(original, &Default::default()).unwrap();
+    let mut editor =
+        PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
+    assert!(editor.start_account_document(Some(("Pictures/Broken.pcraft", b"broken"))).is_err());
+    assert!(editor.start_account_document(Some(("../Outside.pcraft", &bytes))).is_err());
+    assert!(editor.session.documents().is_empty());
+
+    let path = "Pictures/Copy.pcraft";
+    let (id, revision) = editor.start_account_document(Some((path, &bytes))).unwrap();
+    let live = editor.session.active().unwrap();
+    assert_eq!(live.path.as_deref(), Some(path));
+    assert_eq!(live.doc.id, id);
+    assert_eq!(live.saved_revision, revision);
+    assert_eq!(live.doc.name, "Copy.pcraft");
+    assert_eq!(live.doc.layers.len(), original.layers.len());
+    assert_eq!(live.doc.size, original.size);
+    assert!(!live.is_dirty());
+    assert!(editor.start_account_document(None).is_err());
+    assert_eq!(editor.session.documents().len(), 1);
+}
+
+#[test]
+fn account_open_creates_a_clean_untitled_document_through_file_new() {
+    let mut editor =
+        PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
+    let (id, revision) = editor.start_account_document(None).unwrap();
+    let live = editor.session.active().unwrap();
+    assert_eq!(live.doc.id, id);
+    assert_eq!(live.revision, revision);
+    assert!(live.path.is_none());
+    assert!(!editor.has_unsaved_work());
+}
+
+#[test]
+fn account_save_captures_real_layered_bytes_and_adopts_only_the_confirmed_revision() {
+    let mut app = app();
+    let out = Rc::new(RefCell::new(None));
+    let receipt = out.clone();
+    app.services.account_save = Some(Box::new(move |request, bytes| {
+        *receipt.borrow_mut() = Some((request.clone(), bytes));
+        Ok(())
+    }));
+    let ctx = egui::Context::default();
+    let path = "Projects/Layered.pcraft";
+    let initial = identity(&app);
+    let value = menus::invoke(&mut app, &ctx, "file.saveAs", json!({"path":path})).unwrap();
+    assert_eq!(value["pending"], true);
+    assert_eq!(identity(&app), initial);
+    let (request, bytes) = out.borrow_mut().take().unwrap();
+    let decoded = photocraft_io::import("Layered.pcraft", &bytes).unwrap();
+    let captured = app.session.active().unwrap();
+    assert_eq!(decoded.document.layers.len(), captured.doc.layers.len());
+    assert_eq!(decoded.document.size, captured.doc.size);
+    assert!(app.save_as(Some(path.into())).is_err());
+    let mut foreign = request.clone();
+    foreign.ticket += 1;
+    assert!(app.finish_account_save(&foreign, Ok(()), &ctx).is_err());
+    let mut other_path = request.clone();
+    other_path.path = "Projects/Other.pcraft".into();
+    assert!(app.finish_account_save(&other_path, Ok(()), &ctx).is_err());
+
+    app.run("layer.new.layer", json!({})).unwrap();
+    app.finish_account_save(&request, Ok(()), &ctx).unwrap();
+    let saved = app.session.active().unwrap();
+    assert_eq!(saved.doc.id, request.document);
+    assert_eq!(saved.path.as_deref(), Some(path));
+    assert_eq!(saved.doc.name, "Layered.pcraft");
+    assert_eq!(saved.saved_revision, request.revision);
+    assert!(saved.is_dirty());
+    assert_eq!(saved.doc.layers.len(), decoded.document.layers.len() + 1);
+    assert!(app.finish_account_save(&request, Ok(()), &ctx).is_err());
+}
+
+#[test]
+fn failed_account_save_retains_the_committed_binding_and_allows_a_new_ticket() {
+    let mut app = app();
+    app.save_as(Some("Projects/Original.pcraft".into())).unwrap();
+    app.run("layer.new.layer", json!({})).unwrap();
+    let before = identity(&app);
+    let out = Rc::new(RefCell::new(None));
+    let receipt = out.clone();
+    app.services.account_save = Some(Box::new(move |request, _| {
+        *receipt.borrow_mut() = Some(request.clone());
+        Ok(())
+    }));
+    let ctx = egui::Context::default();
+    assert!(app.save_as(Some("../Outside.pcraft".into())).is_err());
+    assert!(app.save_as(Some("Projects/Flat.psd".into())).is_err());
+    assert!(out.borrow().is_none());
+    let path = Some("Projects/Recovered.pcraft".into());
+    app.save_as(path.clone()).unwrap();
+    let failed = out.borrow().clone().unwrap();
+    assert!(app.finish_account_save(&failed, Err("Write conflict".into()), &ctx).is_err());
+    assert_eq!(identity(&app), before);
+    app.save_as(path).unwrap();
+    let retry = out.borrow().clone().unwrap();
+    assert_ne!(retry.ticket, failed.ticket);
+    assert!(app.finish_account_save(&failed, Ok(()), &ctx).is_err());
+    app.finish_account_save(&retry, Ok(()), &ctx).unwrap();
+    assert_eq!(app.session.active().unwrap().path.as_deref(), Some("Projects/Recovered.pcraft"));
+}
+
+#[test]
 fn save_settings_share_only_the_open_documents_native_cache() {
     let mut app = app();
     let first = app.save_settings().io_options().pcraft_cache.unwrap();

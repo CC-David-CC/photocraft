@@ -14,6 +14,8 @@ use photocraft_ui_egui::theme::ThemeKind;
 use photocraft_ui_egui::{FileDialogAnswer, FileDialogRequest, PhotocraftApp, Services};
 use wasm_bindgen::JsCast as _;
 
+use crate::account_host::{self, AccountHost, Parent};
+
 type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 type PlaceInbox = photocraft_ui_egui::PlaceInbox;
 
@@ -59,6 +61,24 @@ pub fn start() {
             return;
         };
         let q = query();
+        let params = web_sys::UrlSearchParams::new_with_str(&q).ok();
+        let hosted = params.as_ref().and_then(|p| p.get("host")).as_deref() == Some("webos-account");
+        let (parent, profile) = if hosted {
+            let profile = params
+                .and_then(|p| p.get("profile"))
+                .filter(|value| !value.is_empty() && value.len() <= 128 && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':')));
+            match (Parent::connect(), profile) {
+                (Ok(parent), Some(profile)) => (Some(parent), Some(profile)),
+                _ => {
+                    if let Some(el) = document.get_element_by_id("photocraft_loading") {
+                        el.set_text_content(Some("PhotoCraft needs a valid WebOS account view."));
+                    }
+                    return;
+                }
+            }
+        } else {
+            (None, None)
+        };
         let force_cpu = q.contains("cpu");
         // `?free-mb=N`: the memory gates and the low-memory warning see only N MiB (diagnostics).
         if let Some(mb) = crate::diagnostics::free_mb(&q) {
@@ -73,7 +93,7 @@ pub fn start() {
         }
         // Hydrate before constructing an interactive session: a late load must never undo a
         // user deletion/reorder. Storage denial or timeout still opens a usable session.
-        let (database, presets, mut preset_warnings) = match crate::indexed_presets::load().await {
+        let (database, presets, mut preset_warnings) = match crate::indexed_presets::load(profile.as_deref()).await {
             Ok((db, bridge, warnings)) => (Some(db), bridge, warnings),
             Err(e) => {
                 let bridge = crate::preset_bridge::Bridge::default();
@@ -93,6 +113,9 @@ pub fn start() {
                 canvas,
                 options,
                 Box::new(move |cc| {
+                    if hosted {
+                        cc.egui_ctx.memory_mut(|memory| *memory = egui::Memory::default());
+                    }
                     PhotocraftApp::install_type_reset_hooks(&cc.egui_ctx);
                     PhotocraftApp::setup_context(&cc.egui_ctx, ThemeKind::Pro);
                     let inbox: Inbox = Arc::default();
@@ -102,7 +125,17 @@ pub fn start() {
                     let (session, warnings) = crate::preset_bridge::session(presets.clone());
                     preset_warnings.extend(warnings);
                     let drag = listen_drag(&pen_target);
-                    let mut app = PhotocraftApp::new(session, services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)));
+                    let mut services = services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag), profile.as_deref());
+                    let host = if let Some(parent) = parent {
+                        let (host, writer) = AccountHost::install(parent, &cc.egui_ctx)?;
+                        services.account_save = Some(writer);
+                        services.write_unconfirmed = false;
+                        host.ready()?;
+                        Some(host)
+                    } else {
+                        None
+                    };
+                    let mut app = PhotocraftApp::new(session, services);
                     if !preset_warnings.is_empty() {
                         photocraft_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
                     }
@@ -116,7 +149,7 @@ pub fn start() {
                     }
                     let unsaved = Arc::new(AtomicBool::new(false));
                     guard_unload(unsaved.clone());
-                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, ui_language: "" }))
+                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, ui_language: "", host }))
                 }),
             )
             .await;
@@ -342,6 +375,7 @@ async fn fetch_bytes(url: &str, integrity: Option<&str>) -> Result<Vec<u8>, Stri
 /// so the app's own drop path can't handle them) and feed them through the inboxes.
 struct WebShell {
     app: PhotocraftApp,
+    host: Option<AccountHost>,
     /// Dropped files to open as documents.
     inbox: Inbox,
     /// Dropped files to place on the active document's canvas.
@@ -414,6 +448,10 @@ impl WebShell {
 }
 
 impl eframe::App for WebShell {
+    fn persist_egui_memory(&self) -> bool {
+        self.host.is_none()
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // A tap reaches eframe as Pointer Events and Touch Events: keep one press per tap, or the
         // twin press closes the menu the first one opened (#2095).
@@ -425,6 +463,14 @@ impl eframe::App for WebShell {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(host) = self.host.as_ref() {
+            if let Err(error) = host.apply_start(&mut self.app) {
+                log::warn!("PhotoCraft could not report account startup: {error}");
+            }
+            if let Err(error) = host.apply_save_result(&mut self.app, ctx) {
+                log::warn!("PhotoCraft could not report its account save result: {error}");
+            }
+        }
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         if !dropped.is_empty() {
             let names: Vec<String> =
@@ -499,7 +545,9 @@ impl eframe::App for WebShell {
     }
 }
 
-fn services(inbox: Inbox, place_inbox: PlaceInbox, cursor_pos: photocraft_ui_egui::CursorPosFn) -> Services {
+fn services(inbox: Inbox, place_inbox: PlaceInbox, cursor_pos: photocraft_ui_egui::CursorPosFn, profile: Option<&str>) -> Services {
+    let load_key = account_host::profile_key(PREFS_KEY, profile);
+    let save_key = load_key.clone();
     Services {
         screen_pick: screen_color_service(),
         import: Some(Box::new(|name: &str, bytes: &[u8], opts: &photocraft_io::ImportOptions| {
@@ -555,8 +603,8 @@ fn services(inbox: Inbox, place_inbox: PlaceInbox, cursor_pos: photocraft_ui_egu
         place_inbox: Some(place_inbox),
         cursor_pos: Some(cursor_pos),
         // Preferences live in the browser's localStorage.
-        load_prefs: Some(Box::new(|| local_storage()?.get_item(PREFS_KEY).ok().flatten())),
-        save_prefs: Some(Box::new(|text: &str| local_storage().ok_or("no localStorage")?.set_item(PREFS_KEY, text).map_err(|e| format!("{e:?}")))),
+        load_prefs: Some(Box::new(move || local_storage()?.get_item(&load_key).ok().flatten())),
+        save_prefs: Some(Box::new(move |text: &str| local_storage().ok_or("no localStorage")?.set_item(&save_key, text).map_err(|e| format!("{e:?}")))),
         load_gpu_memo: None,
         save_gpu_memo: None,
         shader_compiler: None,

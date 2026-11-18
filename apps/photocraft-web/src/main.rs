@@ -28,6 +28,9 @@ mod preset_bridge;
 mod indexed_presets;
 
 #[cfg(target_arch = "wasm32")]
+mod account_host;
+
+#[cfg(target_arch = "wasm32")]
 mod web;
 
 #[cfg(target_arch = "wasm32")]

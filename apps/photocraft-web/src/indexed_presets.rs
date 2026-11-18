@@ -96,9 +96,9 @@ async fn before(promise: &Promise, deadline: f64) -> Result<JsValue, String> {
     result
 }
 
-async fn open(deadline: f64) -> Result<IdbDatabase, String> {
+async fn open(deadline: f64, profile: Option<&str>) -> Result<IdbDatabase, String> {
     let factory = web_sys::window().ok_or("no window")?.indexed_db().map_err(js)?.ok_or("IndexedDB unavailable")?;
-    let req = factory.open_with_u32(DATABASE, 1).map_err(js)?;
+    let req = factory.open_with_u32(&crate::account_host::profile_key(DATABASE, profile), 1).map_err(js)?;
     let mut upgrade = Listeners::new();
     let upgrade_req = req.clone();
     upgrade
@@ -131,9 +131,9 @@ async fn open(deadline: f64) -> Result<IdbDatabase, String> {
     }
 }
 
-pub async fn load() -> Result<(IdbDatabase, Bridge, Vec<String>), String> {
+pub async fn load(profile: Option<&str>) -> Result<(IdbDatabase, Bridge, Vec<String>), String> {
     let deadline = js_sys::Date::now() + TIMEOUT_MS;
-    let db = open(deadline).await?;
+    let db = open(deadline, profile).await?;
     let result = read(&db, deadline).await;
     match result {
         Ok((bridge, warnings)) => Ok((db, bridge, warnings)),
