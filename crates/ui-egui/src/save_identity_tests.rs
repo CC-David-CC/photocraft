@@ -80,6 +80,28 @@ fn account_import_uses_the_native_decoder_without_a_saved_binding() {
 }
 
 #[test]
+fn account_operation_uses_the_native_layer_identity_and_protects_active_type() {
+    let mut editor = app();
+    editor.services.account_save = Some(Box::new(|_, _| Ok(())));
+    let live = editor.session.active().unwrap();
+    let document = live.doc.id;
+    let layer = live.active_layer.unwrap();
+    let state = editor.execute_account_operation(document, None, "document.inspect", json!({})).unwrap();
+    assert!(state["layers"].as_array().unwrap().iter().any(|entry| entry["id"] == layer.0.to_string()));
+    let rename = json!({"layerId":layer.0.to_string(),"name":"Approved rename"});
+    assert!(editor.execute_account_operation(document, Some("Pictures/Other.pcraft"), "layer.rename", rename.clone()).is_err());
+    assert!(editor.execute_account_operation(document, None, "layer.delete", rename.clone()).is_err());
+    editor.execute_account_operation(document, None, "layer.rename", rename.clone()).unwrap();
+    assert_eq!(editor.session.active().unwrap().doc.layer(layer).unwrap().name,"Approved rename");
+
+    editor.run("type.create", json!({"text":"Human edit","x":1,"y":1})).unwrap();
+    crate::type_tool::edit_active(&mut editor).unwrap();
+    let changed = json!({"layerId":layer.0.to_string(),"name":"Blocked rename"});
+    assert!(editor.execute_account_operation(document, None, "layer.rename", changed).unwrap_err().contains("Finish the active"));
+    assert_eq!(editor.session.active().unwrap().doc.layer(layer).unwrap().name,"Approved rename");
+}
+
+#[test]
 fn account_open_creates_a_clean_untitled_document_through_file_new() {
     let mut editor =
         PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });

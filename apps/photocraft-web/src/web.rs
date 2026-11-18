@@ -574,6 +574,14 @@ impl eframe::App for WebShell {
         self.serve_fonts(ctx);
         self.app.logic_frame(ctx, frame);
         if let Some(host) = self.host.as_ref()
+            && let Err(error) = host.apply_operation(
+                &mut self.app,
+                browser_work_pending(ctx, &self.drop_reads, &self.inbox, &self.place_inbox, &self.presets),
+            )
+        {
+            log::warn!("PhotoCraft could not report its account document operation: {error}");
+        }
+        if let Some(host) = self.host.as_ref()
             && let Err(error) = host.apply_save_capture(&mut self.app)
         {
             log::warn!("PhotoCraft could not report the requested account save capture: {error}");

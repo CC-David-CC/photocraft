@@ -164,6 +164,43 @@ impl PhotocraftApp {
         Ok(())
     }
 
+    /// Dispatch a scoped browser host operation against the same editable
+    /// document and command implementation as the native Layers panel.
+    pub fn execute_account_operation(
+        &mut self, document: DocId, path: Option<&str>, command: &str, args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let state = self.account_project_state().ok_or("The PhotoCraft document is unavailable")?;
+        let live = self.session.active().filter(|live| state.document == document && live.path.as_deref() == path)
+            .ok_or("The PhotoCraft document binding changed")?;
+        let args = args.as_object().ok_or("A PhotoCraft argument object is required")?;
+        match command {
+            "document.inspect" if args.is_empty() => {
+                let entries = live.doc.walk();
+                let layers: Vec<_> = entries.iter().take(256).map(|(_,_,layer)| json!({
+                    "id":layer.id.0.to_string(), "name":layer.name, "kind":layer.content.kind_name()
+                })).collect();
+                Ok(json!({"revision":state.revision.to_string(), "dirty":state.dirty,
+                    "size":live.doc.size,"layers":layers,"layerCount":entries.len()}))
+            }
+            "layer.rename" if args.len() == 2 => {
+                if state.unfinished_edit || state.operation_pending {
+                    return Err("Finish the active PhotoCraft edit or operation first".into());
+                }
+                let layer = args.get("layerId").and_then(|id| id.as_str()).and_then(|id| id.parse::<u64>().ok())
+                    .and_then(|id| live.doc.layer(LayerId(id))).ok_or("Unknown PhotoCraft layer")?;
+                let name = args.get("name").and_then(|name| name.as_str())
+                    .filter(|name| !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control))
+                    .ok_or("Choose a valid PhotoCraft layer name")?;
+                let layer = layer.id;
+                self.run("layer.renameLayer", json!({"layer":layer.0,"name":name}))?;
+                let revision = self.session.active().ok_or("The PhotoCraft document closed")?.revision;
+                Ok(json!({"layerId":layer.0.to_string(),"name":name,"revision":revision.to_string()}))
+            }
+            _ => Err("Unsupported PhotoCraft document operation".into()),
+        }
+    }
+
     /// Capture only the named revision authorized by the host. Use the same
     /// native encoder and pending-save receipt as manual Save, without opening
     /// a dialog, ending a tool gesture or adding a step to a recorded action.

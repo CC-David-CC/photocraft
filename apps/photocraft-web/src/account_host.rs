@@ -158,6 +158,7 @@ struct Exchange {
     close: Option<CloseRequest>,
     close_approved: bool,
     recovery: Option<RecoveryRequest>,
+    operation: Option<OperationRequest>,
     project_state: Option<AccountProjectState>,
     save_capture: Option<SaveCaptureRequest>,
     dispatching_capture: Option<SaveCaptureRequest>,
@@ -233,6 +234,27 @@ struct CloseRequest {
     id: String,
     interactive: bool,
     started: bool,
+}
+
+struct OperationRequest {
+    id: String,
+    document: DocId,
+    path: Option<String>,
+    command: String,
+    args: serde_json::Value,
+}
+
+impl OperationRequest {
+    fn read(data: &JsValue) -> Option<Self> {
+        let path = field(data, "path")?;
+        let path = if path.is_null() { None } else { Some(path.as_string().filter(|path| path.len() <= 2048)?) };
+        let command = text(data, "command").filter(|value| matches!(value.as_str(), "document.inspect" | "layer.rename"))?;
+        let args = text(data, "args").filter(|value| value.len() <= 2048)?;
+        Some(Self {
+            id: request_id(data)?, document: DocId(text(data, "documentId")?.parse().ok()?), path, command,
+            args: serde_json::from_str(&args).ok()?,
+        })
+    }
 }
 
 struct PendingDialog {
@@ -328,6 +350,15 @@ impl AccountHost {
                     if inbox.started && !inbox.close_approved && inbox.recovery.is_none() {
                         inbox.recovery = RecoveryRequest::read(&data);
                         if inbox.recovery.is_some() {
+                            wake.request_repaint();
+                        }
+                    }
+                    return;
+                }
+                Some("photocraft:account-operation") => {
+                    if inbox.started && !inbox.close_approved && inbox.operation.is_none() {
+                        inbox.operation = OperationRequest::read(&data);
+                        if inbox.operation.is_some() {
                             wake.request_repaint();
                         }
                     }
@@ -484,6 +515,7 @@ impl AccountHost {
             let (operation, result) = match request.operation {
                 SessionOperation::Pause {document, revision, dirty, unfinished_edit} => {
                     let ready = !exchange.close_approved && exchange.close.is_none() && !exchange.session_finalized
+                        && exchange.operation.is_none()
                         && exchange.session_lease.is_none() && exchange.save_capture.is_none()
                         && !browser_work_pending();
                     ("pause", if ready {
@@ -589,6 +621,23 @@ impl AccountHost {
             Err(error) => put(&message, "message", error)?,
         }
         self.parent.send(&message, &transfer)
+    }
+
+    pub fn apply_operation(&self, app: &mut PhotocraftApp, browser_work_pending: bool) -> Result<(), String> {
+        let Some(op) = self.exchange.borrow_mut().operation.take() else { return Ok(()) };
+        let result = if browser_work_pending && op.command != "document.inspect" {
+            Err("Finish the active PhotoCraft browser operation first".into())
+        } else {
+            app.execute_account_operation(op.document, op.path.as_deref(), &op.command, op.args)
+        };
+        let message = packet("photocraft:account-operation-result")?;
+        put(&message, "requestId", op.id)?;
+        put(&message, "documentId", op.document.0.to_string())?;
+        match result {
+            Ok(value) => put(&message, "result", value.to_string())?,
+            Err(error) => put(&message, "message", error)?,
+        }
+        self.parent.send(&message, &Array::new())
     }
 
     pub fn publish_project_state(&self, app: &PhotocraftApp, browser_work_pending: bool) -> Result<(), String> {
