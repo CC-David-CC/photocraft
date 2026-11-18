@@ -115,6 +115,52 @@ fn account_linked_asset_can_be_replaced_with_embedded_contents() {
 }
 
 #[test]
+fn account_state_keeps_dirty_smart_object_work_bound_to_the_project() {
+    let mut fixture = app();
+    fixture.run("layer.newFillLayer.pattern", json!({"pattern":"Bricks"})).unwrap();
+    fixture.run("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+    let document = &fixture.session.active().unwrap().doc;
+    let smart_layer = fixture.session.active().unwrap().active_layer.unwrap();
+    let bytes = photocraft_format::save_to_bytes(document, &Default::default()).unwrap();
+    let mut editor = PhotocraftApp::new(Session::new(), Services {
+        account_save: Some(Box::new(|_, _| panic!("smart object Save must update its parent in memory"))),
+        account_window_close: Some(Box::new(|| panic!("closing the smart tab must keep the account window"))),
+        ..Default::default()
+    });
+    let project = "Pictures/Project.pcraft";
+    let context = egui::Context::default();
+    let (root, revision) = editor.start_account_document(Some((project, &bytes)), None).unwrap();
+    editor.run("layer.smartObjects.editContents", json!({"layer":smart_layer.0})).unwrap();
+    editor.run("layer.new.layer", json!({"name":"Nested edit"})).unwrap();
+    let state = editor.account_project_state().unwrap();
+    assert_eq!((state.document, state.revision), (root, revision));
+    assert!(state.dirty && state.operation_pending);
+    assert!(!state.capturable && !state.autosave_eligible);
+    assert!(editor.check_account_pause(root, revision, true, false).is_err());
+    assert!(editor.execute_account_operation(root, Some(project), "document.inspect", json!({})).is_err());
+    assert!(editor.save_as(Some("Pictures/Other.pcraft".into())).unwrap_err().contains("smart object"));
+
+    menus::invoke(&mut editor, &context, "file.save", json!({})).unwrap();
+    assert!(!editor.session.active().unwrap().is_dirty());
+    menus::invoke(&mut editor, &context, "file.close", json!({})).unwrap();
+    let state = editor.account_project_state().unwrap();
+    assert_eq!(state.document, root);
+    assert!(state.revision > revision && state.dirty && state.capturable && state.autosave_eligible);
+    let before_discard = editor.capture_account_recovery(root, state.revision).unwrap();
+
+    editor.run("layer.smartObjects.editContents", json!({"layer":smart_layer.0})).unwrap();
+    editor.run("layer.new.layer", json!({"name":"Discard this edit"})).unwrap();
+    menus::invoke(&mut editor, &context, "file.close", json!({})).unwrap();
+    crate::discard_ui::answer_choice(&mut editor, &context, "cancel", false).unwrap();
+    assert_eq!(editor.session.documents().len(), 2);
+    menus::invoke(&mut editor, &context, "file.close", json!({})).unwrap();
+    crate::discard_ui::answer_choice(&mut editor, &context, "dontSave", false).unwrap();
+    assert_eq!(editor.session.documents().len(), 1);
+    assert_eq!(editor.account_project_state(), Some(state));
+    assert_eq!(editor.capture_account_recovery(root, state.revision).unwrap(), before_discard);
+}
+
+#[test]
 fn account_operation_uses_the_native_layer_identity_and_protects_active_edits() {
     let mut editor = app();
     editor.services.account_save = Some(Box::new(|_, _| Ok(())));

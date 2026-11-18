@@ -505,7 +505,17 @@ fn apply_to_rest(app: &mut PhotocraftApp, doc: DocId, answer: Answer, from_contr
 fn apply(app: &mut PhotocraftApp, ctx: &egui::Context, doc: DocId, answer: Answer, from_control: bool) -> Result<(), String> {
     match answer {
         Answer::Cancel => app.discard = None,
-        Answer::Discard => advance(app, ctx),
+        Answer::Discard => {
+            // The engine normally commits a dirty smart child as it closes. This explicit
+            // discard of a hosted child must leave the parent's last saved child contents.
+            if app.services.account_window_close.is_some()
+                && app.discard.as_ref().is_some_and(|prompt| prompt.id == "file.close")
+                && app.session.smart_links.iter().any(|link| link.child == doc)
+            {
+                app.session.smart_links.retain(|link| link.child != doc);
+            }
+            advance(app, ctx);
+        }
         Answer::Save => {
             authorize_save(app, from_control)?;
             if save(app, ctx, doc) {

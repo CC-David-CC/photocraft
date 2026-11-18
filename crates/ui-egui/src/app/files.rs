@@ -608,6 +608,9 @@ impl PhotocraftApp {
             return jobs_ui::start_save(self, path, settings.clone(), copy, save, false);
         }
         let st = self.session.active().ok_or("no document")?;
+        if account_write && self.account_save.document.is_some_and(|id| id != st.doc.id) {
+            return Err("Save changes to the smart object first, then save the account project.".into());
+        }
         ensure_memory_to_save(&st.doc, &path)?;
         let (doc, written, previous) = (st.doc.id, st.revision, st.saved_revision);
         let export = self.services.export.as_ref().ok_or("no exporter configured")?;

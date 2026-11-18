@@ -132,6 +132,7 @@ struct Pending {
 pub(crate) struct AccountSaveState {
     last_ticket: u64,
     pending: Option<Pending>,
+    pub(super) document: Option<DocId>,
     pub(crate) editor_context: Option<egui::Context>,
     pub(crate) close_approved: bool,
 }
@@ -149,20 +150,26 @@ impl PhotocraftApp {
     }
 
     pub fn account_project_state(&self) -> Option<AccountProjectState> {
-        if self.services.account_save.is_none() || self.session.documents().len() != 1 {
+        if self.services.account_save.is_none() {
             return None;
         }
-        let st = self.session.active()?;
+        let documents = self.session.documents();
+        let st = match self.account_save.document {
+            Some(id) => documents.iter().find(|state| state.doc.id == id)?,
+            None if documents.len() == 1 => self.session.active()?,
+            None => return None,
+        };
+        let multiple = documents.len() > 1;
         let other_edit = self.account_edit_in_progress(false);
-        let operation_pending = self.saving() || !self.session.jobs().is_empty() || self.file_dialog_open() || self.discard.is_some();
+        let operation_pending = multiple || self.saving() || !self.session.jobs().is_empty() || self.file_dialog_open() || self.discard.is_some();
         let unfinished_edit = other_edit || self.ui.text_edit.is_some();
         let type_can_recover = self.ui.text_edit.as_ref().is_none_or(|edit|
             edit.preedit.is_none() && !edit.dragging && edit.resize.is_none()
                 && edit.document.is_none_or(|doc| doc == st.doc.id.0)
                 && st.coalesce.as_deref() == Some(edit.session.as_str())
                 && st.history.can_undo());
-        Some(AccountProjectState { document: st.doc.id, revision: st.revision, dirty: st.is_dirty(),
-            capturable: type_can_recover && !other_edit,
+        Some(AccountProjectState { document: st.doc.id, revision: st.revision, dirty: documents.iter().any(|state| state.is_dirty()),
+            capturable: type_can_recover && !other_edit && !multiple,
             autosave_eligible: st.path.is_some() && !unfinished_edit && !operation_pending,
             operation_pending, unfinished_edit })
     }
@@ -187,7 +194,7 @@ impl PhotocraftApp {
     ) -> Result<serde_json::Value, String> {
         use serde_json::json;
         let state = self.account_project_state().ok_or("The PhotoCraft document is unavailable")?;
-        let live = self.session.active().filter(|live| state.document == document && live.path.as_deref() == path)
+        let live = self.session.active().filter(|live| live.doc.id == document && state.document == document && live.path.as_deref() == path)
             .ok_or("The PhotoCraft document binding changed")?;
         let args = args.as_object().ok_or("A PhotoCraft argument object is required")?;
         match command {
@@ -286,6 +293,7 @@ impl PhotocraftApp {
             }
         }
         let state = self.session.active().ok_or("PhotoCraft did not open a document")?;
+        self.account_save.document = Some(state.doc.id);
         Ok((state.doc.id, state.revision))
     }
 
@@ -320,6 +328,7 @@ impl PhotocraftApp {
         let state = self.session.active_mut().ok_or("The PhotoCraft import is unavailable")?;
         state.saved_revision = 0;
         let admitted = (state.doc.id, state.revision);
+        self.account_save.document = Some(admitted.0);
         if let Some(warning) = account_external_asset_warning(&state.doc) {
             let status = self.ui.status.clone();
             crate::notices::io_warnings(self, &status, &[warning]);
@@ -363,6 +372,7 @@ impl PhotocraftApp {
         let state = self.session.active_mut().ok_or("PhotoCraft did not restore the project")?;
         state.saved_revision = 0;
         let admitted = (state.doc.id, state.revision);
+        self.account_save.document = Some(admitted.0);
         self.sync_views();
         if let Some((before, draft)) = pending_type {
             let text = draft.text(&self.session.active().ok_or("The recovered project closed")?.doc)?;

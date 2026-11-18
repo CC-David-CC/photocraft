@@ -69,11 +69,30 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
     {
         authorize(id, &params)?;
     }
-    if matches!(id, "file.close" | "file.closeAll" | "file.exit")
-        && let Some(close) = app.services.account_window_close.as_ref()
-    {
-        close()?;
-        return Ok(Value::Null);
+    if let Some(close) = app.services.account_window_close.as_ref() {
+        if id == "file.closeOthers" && app.session.documents().len() > 1 {
+            return Err(tl!("Close the smart-object tabs individually.").into());
+        }
+        if matches!(id, "file.close" | "file.closeAll" | "file.exit") {
+            let target = match params.get("document").and_then(Value::as_u64) {
+                Some(index) if id == "file.close" => Some(app.session.documents().get(index as usize).ok_or("The PhotoCraft tab closed.")?),
+                Some(_) => None,
+                None => app.session.active(),
+            };
+            let child = target.filter(|target| id == "file.close"
+                && app.session.smart_links.iter().any(|link| link.child == target.doc.id));
+            if let Some(child) = child {
+                if app.account_edit_in_progress(true) {
+                    return Err(tl!("Finish or cancel the current PhotoCraft edit before closing.").into());
+                }
+                if app.session.smart_links.iter().any(|link| link.parent == child.doc.id) {
+                    return Err(tl!("Close the nested smart-object tab first.").into());
+                }
+            } else {
+                close()?;
+                return Ok(Value::Null);
+            }
+        }
     }
     // A held Type box handle applies its box before any command that may read or edit the
     // document runs; a command that edits it first would make the drag's box stale and lose it.
