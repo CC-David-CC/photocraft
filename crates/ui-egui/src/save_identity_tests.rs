@@ -67,13 +67,13 @@ fn account_import_uses_the_native_decoder_without_a_saved_binding() {
     assert!(editor.start_account_import("Broken.png", b"broken").is_err());
     assert!(editor.session.documents().is_empty());
     editor.start_account_import("Local.pcraft", &bytes).unwrap();
-    let (id, revision) = editor.finish_account_import().unwrap().unwrap();
+    let (id, _) = editor.finish_account_import().unwrap().unwrap();
     let live = editor.session.active().unwrap();
     assert_eq!(live.path, None);
     assert_eq!(live.doc.size, original.size);
     assert_eq!(live.doc.layers.len(), original.layers.len());
     assert!(live.is_dirty());
-    assert!(editor.capture_account_recovery(id, revision).is_ok());
+    assert!(editor.capture_account_recovery(id, editor.account_project_state().unwrap().recovery_revision).is_ok());
     assert!(editor.open_bytes("Second.pcraft", &bytes).is_err());
     assert_eq!(editor.session.documents().len(), 1);
     assert_eq!(editor.session.active().unwrap().doc.id, id);
@@ -135,18 +135,54 @@ fn account_state_keeps_dirty_smart_object_work_bound_to_the_project() {
     let state = editor.account_project_state().unwrap();
     assert_eq!((state.document, state.revision), (root, revision));
     assert!(state.dirty && state.operation_pending);
-    assert!(!state.capturable && !state.autosave_eligible);
+    assert!(state.capturable && !state.autosave_eligible);
     assert!(editor.check_account_pause(root, revision, true, false).is_err());
     assert!(editor.execute_account_operation(root, Some(project), "document.inspect", json!({})).is_err());
     assert!(editor.save_as(Some("Pictures/Other.pcraft".into())).unwrap_err().contains("smart object"));
 
+    editor.run("layer.new.layer", json!({"name":"Second nested edit"})).unwrap();
+    assert!(editor.capture_account_recovery(root, state.recovery_revision).is_err());
+    let text_layer = editor.run("type.create", json!({"text":"Before","x":1,"y":2})).unwrap()["layer"].as_u64().unwrap();
+    crate::type_tool::edit_active(&mut editor).unwrap();
+    let group = editor.ui.text_edit.as_ref().unwrap().session.clone();
+    editor.run("type.edit", json!({"layer":text_layer,"text":"Pending","coalesce":group})).unwrap();
+    let state = editor.account_project_state().unwrap();
+    assert_eq!(state.revision, revision);
+    assert!(state.capturable && state.unfinished_edit);
+    let original_child = editor.session.active().unwrap().doc.clone();
+    let draft = editor.capture_account_recovery(root, state.recovery_revision).unwrap();
+    assert_eq!(editor.account_project_state(), Some(state));
+    let mut restored = PhotocraftApp::new(Session::new(), Services {
+        account_save: Some(Box::new(|_, _| panic!("recovery must not save to the account"))),
+        ..Default::default()
+    });
+    assert!(restored.start_account_recovery(Some(project), &draft[..draft.len()-1]).is_err());
+    assert!(restored.session.documents().is_empty());
+    let (restored_root, _) = restored.start_account_recovery(Some(project), &draft).unwrap();
+    assert_eq!(restored.session.documents().len(), 2);
+    let restored_child = restored.session.active().unwrap();
+    assert!(restored_child.is_dirty());
+    assert_eq!(restored_child.doc.layers.len(), original_child.layers.len());
+    assert_eq!(restored_child.doc.id, original_child.id);
+    assert!(restored_child.path.is_none());
+    assert_eq!(restored.ui.text_edit.as_ref().unwrap().layer, text_layer);
+    crate::type_tool::cancel(&mut restored);
+    let recovered_layer = restored.session.active().unwrap().doc.layer(photocraft_doc::LayerId(text_layer)).unwrap();
+    let photocraft_doc::LayerContent::Text(text) = &recovered_layer.content else { panic!("restored text layer") };
+    assert_eq!(text.text, "Before");
+    menus::invoke(&mut restored, &context, "file.save", json!({})).unwrap();
+    let root_state = restored.session.documents().iter().find(|tab| tab.doc.id == restored_root).unwrap();
+    assert!(root_state.is_dirty());
+    assert_eq!(root_state.path.as_deref(), Some(project));
+
+    crate::type_tool::commit(&mut editor);
     menus::invoke(&mut editor, &context, "file.save", json!({})).unwrap();
     assert!(!editor.session.active().unwrap().is_dirty());
     menus::invoke(&mut editor, &context, "file.close", json!({})).unwrap();
     let state = editor.account_project_state().unwrap();
     assert_eq!(state.document, root);
     assert!(state.revision > revision && state.dirty && state.capturable && state.autosave_eligible);
-    let before_discard = editor.capture_account_recovery(root, state.revision).unwrap();
+    let before_discard = editor.capture_account_recovery(root, state.recovery_revision).unwrap();
 
     editor.run("layer.smartObjects.editContents", json!({"layer":smart_layer.0})).unwrap();
     editor.run("layer.new.layer", json!({"name":"Discard this edit"})).unwrap();
@@ -156,8 +192,9 @@ fn account_state_keeps_dirty_smart_object_work_bound_to_the_project() {
     menus::invoke(&mut editor, &context, "file.close", json!({})).unwrap();
     crate::discard_ui::answer_choice(&mut editor, &context, "dontSave", false).unwrap();
     assert_eq!(editor.session.documents().len(), 1);
-    assert_eq!(editor.account_project_state(), Some(state));
-    assert_eq!(editor.capture_account_recovery(root, state.revision).unwrap(), before_discard);
+    let after = editor.account_project_state().unwrap();
+    assert_eq!(after.revision, state.revision);
+    assert_eq!(editor.capture_account_recovery(root, after.recovery_revision).unwrap(), before_discard);
 }
 
 #[test]
@@ -211,7 +248,8 @@ fn account_recovery_round_trips_layers_as_unsaved_without_changing_the_live_edit
     source.services.account_save = Some(Box::new(|_, _| panic!("recovery must not save to the account")));
     let before = identity(&source);
     let live = source.session.active().unwrap();
-    let (document, revision, size, layers) = (live.doc.id, live.revision, live.doc.size, live.doc.layers.len());
+    let (document, size, layers) = (live.doc.id, live.doc.size, live.doc.layers.len());
+    let revision = source.account_project_state().unwrap().recovery_revision;
     assert!(source.capture_account_recovery(document, revision - 1).is_err());
     let bytes = source.capture_account_recovery(document, revision).unwrap();
     assert_eq!(identity(&source), before);
@@ -251,7 +289,8 @@ fn account_recovery_preserves_the_previous_snapshot_during_a_live_type_edit() {
         resize: None,
         preedit: Some((0, 1)),
     });
-    assert!(source.capture_account_recovery(document, revision).is_err());
+    let recovery_revision = source.account_project_state().unwrap().recovery_revision;
+    assert!(source.capture_account_recovery(document, recovery_revision).is_err());
     assert_eq!(source.ui.text_edit.as_ref().unwrap().preedit, Some((0, 1)));
     assert_eq!(source.session.active().unwrap().revision, revision);
 }
@@ -288,7 +327,7 @@ fn account_recovery_restores_pending_type_and_its_native_cancel_baseline() {
     source.run("type.edit", json!({"layer":layer,"text":"Pending","coalesce":key})).unwrap();
     let state = source.account_project_state().unwrap();
     assert!(state.dirty && state.capturable);
-    let bytes = source.capture_account_recovery(state.document, state.revision).unwrap();
+    let bytes = source.capture_account_recovery(state.document, state.recovery_revision).unwrap();
     assert_eq!(source.account_project_state(), Some(state));
     assert!(source.ui.text_edit.is_some());
 

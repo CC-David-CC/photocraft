@@ -2,9 +2,11 @@
 
 use photocraft_doc::{DocId, Document, LayerContent, LayerId, SmartSource, TextLayer};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::{PhotocraftApp, dialogs::discard_ui};
+
+mod nested;
 
 const TYPE_DRAFT: &[u8] = b"PCDRAFT1";
 const TYPE_DRAFT_HEADER: usize = 16;
@@ -24,6 +26,7 @@ fn account_external_asset_warning(doc: &Document) -> Option<String> {
 pub struct AccountProjectState {
     pub document: DocId,
     pub revision: u64,
+    pub recovery_revision: u64,
     pub dirty: bool,
     pub capturable: bool,
     pub autosave_eligible: bool,
@@ -69,7 +72,9 @@ fn encode_type_draft(bytes: Vec<u8>, before: &Document, draft: &TypeDraft) -> Re
     Ok(out)
 }
 
-fn decode_recovery(bytes: &[u8]) -> Result<(Document, Option<(Document, TypeDraft)>), String> {
+type RecoveredType = (Document, TypeDraft);
+
+fn decode_recovery(bytes: &[u8]) -> Result<(Document, Option<RecoveredType>), String> {
     let load = |part| photocraft_format::load_from_bytes(part).map_err(|error| error.to_string());
     if !bytes.starts_with(TYPE_DRAFT) {
         return Ok((load(bytes)?, None));
@@ -129,10 +134,32 @@ struct Pending {
 }
 
 #[derive(Default)]
+struct RecoveryRevision {
+    value: u64,
+    active: Option<DocId>,
+    tabs: Vec<(DocId, u64, bool)>,
+}
+
+impl RecoveryRevision {
+    fn observe(&mut self, session: &photocraft_engine::Session) -> u64 {
+        let active = session.active().map(|tab| tab.doc.id);
+        let tabs = || session.documents().iter().map(|tab| (tab.doc.id, tab.revision, tab.is_dirty()));
+        if self.active != active || !self.tabs.iter().copied().eq(tabs()) {
+            self.value += 1;
+            self.active = active;
+            self.tabs.clear();
+            self.tabs.extend(tabs());
+        }
+        self.value
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct AccountSaveState {
     last_ticket: u64,
     pending: Option<Pending>,
     pub(super) document: Option<DocId>,
+    recovery_revision: RefCell<RecoveryRevision>,
     pub(crate) editor_context: Option<egui::Context>,
     pub(crate) close_approved: bool,
 }
@@ -149,6 +176,10 @@ impl PhotocraftApp {
         self.account_save.editor_context = Some(ctx.clone());
     }
 
+    fn account_type_tab(&self, edit: &crate::state::TextEdit) -> Option<DocId> {
+        edit.document.map(DocId).or_else(|| self.session.active().map(|tab| tab.doc.id))
+    }
+
     pub fn account_project_state(&self) -> Option<AccountProjectState> {
         if self.services.account_save.is_none() {
             return None;
@@ -163,13 +194,16 @@ impl PhotocraftApp {
         let other_edit = self.account_edit_in_progress(false);
         let operation_pending = multiple || self.saving() || !self.session.jobs().is_empty() || self.file_dialog_open() || self.discard.is_some();
         let unfinished_edit = other_edit || self.ui.text_edit.is_some();
-        let type_can_recover = self.ui.text_edit.as_ref().is_none_or(|edit|
-            edit.preedit.is_none() && !edit.dragging && edit.resize.is_none()
-                && edit.document.is_none_or(|doc| doc == st.doc.id.0)
-                && st.coalesce.as_deref() == Some(edit.session.as_str())
-                && st.history.can_undo());
-        Some(AccountProjectState { document: st.doc.id, revision: st.revision, dirty: documents.iter().any(|state| state.is_dirty()),
-            capturable: type_can_recover && !other_edit && !multiple,
+        let type_can_recover = self.ui.text_edit.as_ref().is_none_or(|edit| {
+            if edit.preedit.is_some() || edit.dragging || edit.resize.is_some() { return false; }
+            let target = self.account_type_tab(edit);
+            documents.iter().any(|tab| Some(tab.doc.id) == target
+                && tab.coalesce.as_deref() == Some(edit.session.as_str()) && tab.history.can_undo())
+        });
+        let recovery_revision = self.account_save.recovery_revision.borrow_mut().observe(&self.session);
+        let capturable = !other_edit && type_can_recover && (!multiple || nested::can_capture(&self.session, st.doc.id));
+        Some(AccountProjectState { document: st.doc.id, revision: st.revision, recovery_revision, dirty: documents.iter().any(|state| state.is_dirty()),
+            capturable,
             autosave_eligible: st.path.is_some() && !unfinished_edit && !operation_pending,
             operation_pending, unfinished_edit })
     }
@@ -339,14 +373,21 @@ impl PhotocraftApp {
     /// Encode a browser-local recovery snapshot without saving the editor or
     /// acknowledging any server write. The caller owns the base Storage revision.
     pub fn capture_account_recovery(&self, document: DocId, revision: u64) -> Result<Vec<u8>, String> {
-        let state = self.account_project_state().filter(|st| st.document == document && st.revision == revision && st.dirty)
+        let state = self.account_project_state().filter(|st| st.document == document && st.recovery_revision == revision && st.dirty)
             .ok_or("The PhotoCraft recovery revision is no longer current")?;
         if !state.capturable {
             return Err("A PhotoCraft edit is still in progress".into());
         }
+        if self.session.documents().len() > 1 {
+            return nested::encode(&self.session, document, |tab| self.encode_account_recovery_tab(tab));
+        }
         let live = self.session.active().ok_or("PhotoCraft recovery needs one account document")?;
+        self.encode_account_recovery_tab(live)
+    }
+
+    fn encode_account_recovery_tab(&self, live: &photocraft_engine::DocState) -> Result<Vec<u8>, String> {
         let bytes = photocraft_format::save_to_bytes(&live.doc, &Default::default()).map_err(|error| error.to_string())?;
-        let Some(edit) = self.ui.text_edit.as_ref() else { return Ok(bytes) };
+        let Some(edit) = self.ui.text_edit.as_ref().filter(|edit| self.account_type_tab(edit) == Some(live.doc.id)) else { return Ok(bytes) };
         let before = live.history.clone().undo(live.doc.clone()).map(|pair| pair.0).ok_or("The Type edit baseline is unavailable")?;
         let draft = TypeDraft {layer: edit.layer, anchor: edit.anchor, caret: edit.caret, created: edit.created, mask: edit.mask};
         draft.text(&live.doc)?;
@@ -361,6 +402,9 @@ impl PhotocraftApp {
         }
         if let Some(path) = path {
             validate_path(path)?;
+        }
+        if bytes.starts_with(nested::MAGIC) {
+            return self.restore_nested_account_recovery(path, nested::decode(bytes)?);
         }
         let (mut doc, pending_type) = decode_recovery(bytes)?;
         if let Some(path) = path {
@@ -385,6 +429,47 @@ impl PhotocraftApp {
         self.ui.status_error = false;
         crate::notices::io_warnings(self, status, &warnings);
         Ok(admitted)
+    }
+
+    fn restore_nested_account_recovery(&mut self, path: Option<&str>, snapshot: nested::Snapshot) -> Result<(DocId, u64), String> {
+        let mut ids = HashMap::new();
+        let mut warnings = Vec::new();
+        let mut pending_type = None;
+        for (mut doc, dirty, type_draft) in snapshot.tabs {
+            let id = doc.id;
+            let is_root = id == snapshot.root;
+            let tab_path = path.filter(|_| is_root);
+            if let Some(path) = tab_path { doc.name = crate::file_open::display_name(path); }
+            warnings.extend(photocraft_io::open_warnings(&doc));
+            warnings.extend(account_external_asset_warning(&doc));
+            let index = self.session.add_document(doc, tab_path.map(str::to_owned));
+            let state = self.session.active_mut().ok_or("PhotoCraft did not restore the project tab")?;
+            if dirty || is_root && path.is_none() { state.saved_revision = 0; }
+            ids.insert(id, (index, state.doc.id, state.revision));
+            if let Some((before, draft)) = type_draft {
+                pending_type = Some((index, before, draft));
+            }
+        }
+        for mut link in snapshot.links {
+            link.child = ids[&link.child].1;
+            link.parent = ids[&link.parent].1;
+            self.session.smart_links.push(link);
+        }
+        self.sync_views();
+        if let Some((index, before, draft)) = pending_type {
+            self.session.set_active(index);
+            let text = draft.text(&self.session.active().ok_or("The recovered project tab closed")?.doc)?;
+            let orientation = text.orientation;
+            self.restore_account_type(before, draft, orientation)?;
+        }
+        self.session.set_active(ids[&snapshot.active].0);
+        let (_, root, revision) = ids[&snapshot.root];
+        self.account_save.document = Some(root);
+        let status = "Recovered PhotoCraft project and smart-object tabs from this browser";
+        self.ui.status = status.into();
+        self.ui.status_error = false;
+        crate::notices::io_warnings(self, status, &warnings);
+        Ok((root, revision))
     }
 
     fn restore_account_type(&mut self, mut before: Document, draft: TypeDraft, orientation: photocraft_doc::text::Orientation) -> Result<(), String> {

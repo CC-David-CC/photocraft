@@ -75,6 +75,7 @@ fn project_fields(object: &Object, state: Option<AccountProjectState>) -> Result
     if let Some(state) = state {
         put(object, "documentId", state.document.0.to_string())?;
         put(object, "revision", state.revision.to_string())?;
+        put(object, "recoveryRevision", state.recovery_revision.to_string())?;
         put(object, "dirty", state.dirty)?;
         put(object, "capturable", state.capturable)?;
         put(object, "autosaveEligible", state.autosave_eligible)?;
