@@ -6,7 +6,7 @@ use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
 use photocraft_doc::DocId;
 use photocraft_ui_egui::{AccountDialogFn, AccountDialogRequest, AccountProjectState, AccountSaveFn, AccountSaveRequest, FileDialogAnswer, FileDialogReply, PhotocraftApp};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
-use web_sys::{MessageEvent, Window};
+use web_sys::{File, MessageEvent, Window};
 
 // This is the WebOS Storage gateway's maximum binary upload size.
 const MAX_PROJECT_BYTES: usize = 128 * 1024 * 1024;
@@ -93,9 +93,14 @@ fn browser_project_state(app: &PhotocraftApp, browser_work_pending: bool) -> Opt
 
 struct StartRequest {
     id: String,
-    project: Option<(Option<String>, ArrayBuffer)>,
-    new_settings: Option<serde_json::Value>,
-    recover: bool,
+    source: StartSource,
+}
+
+enum StartSource {
+    Blank(Option<serde_json::Value>),
+    Project(String, ArrayBuffer),
+    Recovery(Option<String>, ArrayBuffer),
+    Import(String, ArrayBuffer),
 }
 
 impl StartRequest {
@@ -104,21 +109,6 @@ impl StartRequest {
         let recover = field(packet, "recover").and_then(|value| value.as_bool()).unwrap_or(false);
         let path = field(packet, "path")?;
         let bytes = field(packet, "bytes")?;
-        let project = if !recover && path.is_null() && bytes.is_null() {
-            None
-        } else {
-            let path = if recover && path.is_null() {
-                None
-            } else {
-                Some(path.as_string().filter(|path| !path.is_empty() && path.len() <= 2048)?)
-            };
-            let bytes = bytes.dyn_into::<ArrayBuffer>().ok()?;
-            let length = bytes.byte_length() as usize;
-            if !(1..=MAX_PROJECT_BYTES).contains(&length) {
-                return None;
-            }
-            Some((path, bytes))
-        };
         let settings = field(packet, "newSettings")?;
         let new_settings = if settings.is_null() || settings.is_undefined() {
             None
@@ -127,16 +117,38 @@ impl StartRequest {
             let value: serde_json::Value = serde_json::from_str(&settings).ok()?;
             Some(value.is_object().then_some(value)?)
         };
-        if recover && new_settings.is_some() {
-            return None;
-        }
-        Some(Self { id, project, new_settings, recover })
+        let import = field(packet, "importName")?;
+        let source = if !recover && path.is_null() && bytes.is_null() && import.is_null() {
+            StartSource::Blank(new_settings)
+        } else {
+            if new_settings.is_some() {
+                return None;
+            }
+            let path = if path.is_null() { None } else { Some(path.as_string().filter(|path| !path.is_empty() && path.len() <= 2048)?) };
+            let bytes = bytes.dyn_into::<ArrayBuffer>().ok()?;
+            if !(1..=MAX_PROJECT_BYTES).contains(&(bytes.byte_length() as usize)) {
+                return None;
+            }
+            match (recover, path, import.is_null() || import.is_undefined()) {
+                (true, path, true) => StartSource::Recovery(path, bytes),
+                (false, Some(path), true) => StartSource::Project(path, bytes),
+                (false, None, false) => StartSource::Import(import.as_string().filter(|name| valid_import_name(name))?, bytes),
+                _ => return None,
+            }
+        };
+        Some(Self { id, source })
     }
+}
+
+fn valid_import_name(name: &str) -> bool {
+    !name.trim().is_empty() && name != "." && name != ".." && name.len() <= 255
+        && !name.contains(['/', '\\']) && !name.chars().any(char::is_control)
 }
 
 #[derive(Default)]
 struct Exchange {
     start: Option<StartRequest>,
+    importing: Option<String>,
     started: bool,
     last_dialog: u64,
     dialog: Option<PendingDialog>,
@@ -289,7 +301,7 @@ impl AccountHost {
             }
             match kind.as_deref() {
                 Some("photocraft:account-start") => {
-                    if !inbox.started && inbox.start.is_none() {
+                    if !inbox.started && inbox.start.is_none() && inbox.importing.is_none() {
                         inbox.start = StartRequest::read(&data);
                         if inbox.start.is_some() {
                             wake.request_repaint();
@@ -408,6 +420,18 @@ impl AccountHost {
         move || parent.send(&packet("photocraft:account-close-intent")?, &Array::new())
     }
 
+    pub fn open_dropped_file(&self, file: &File) -> Result<(), String> {
+        if !self.exchange.borrow().started {
+            return Err("Wait for the PhotoCraft editor to finish opening".into());
+        }
+        if !valid_import_name(&file.name()) || !(1.0..=MAX_PROJECT_BYTES as f64).contains(&file.size()) {
+            return Err("PhotoCraft needs a named file no larger than 128 MiB".into());
+        }
+        let message = packet("photocraft:account-local-file")?;
+        put(&message, "file", file)?;
+        self.parent.send(&message, &Array::new())
+    }
+
     /// Tick before native input and again after the prompt has drawn.
     /// Once approved, stop running the embedded editor until its owner removes it.
     pub fn apply_close(&self, app: &mut PhotocraftApp, browser_work_pending: impl Fn() -> bool) -> Result<bool, String> {
@@ -495,21 +519,46 @@ impl AccountHost {
     }
 
     pub fn apply_start(&self, app: &mut PhotocraftApp) -> Result<(), String> {
+        let importing = self.exchange.borrow().importing.clone();
+        if let Some(id) = importing {
+            let opened = match app.finish_account_import() {
+                Ok(None) => return Ok(()),
+                Ok(Some(opened)) => Ok(opened),
+                Err(error) => Err(error),
+            };
+            self.exchange.borrow_mut().importing = None;
+            return self.report_start(id, None, opened);
+        }
         let Some(start) = self.exchange.borrow_mut().start.take() else { return Ok(()) };
-        let mut path = None;
-        let opened = if let Some((name, buffer)) = start.project {
-            let bytes = Uint8Array::new(buffer.as_ref()).to_vec();
-            path = name;
-            if start.recover {
-                app.start_account_recovery(path.as_deref(), &bytes)
-            } else {
-                app.start_account_document(path.as_deref().map(|name| (name, bytes.as_slice())), start.new_settings)
+        let (path, opened) = match start.source {
+            StartSource::Blank(settings) => (None, app.start_account_document(None, settings)),
+            StartSource::Project(path, buffer) => {
+                let bytes = Uint8Array::new(buffer.as_ref()).to_vec();
+                let opened = app.start_account_document(Some((&path, &bytes)), None);
+                (Some(path), opened)
             }
-        } else {
-            app.start_account_document(None, start.new_settings)
+            StartSource::Recovery(path, buffer) => {
+                let bytes = Uint8Array::new(buffer.as_ref()).to_vec();
+                let opened = app.start_account_recovery(path.as_deref(), &bytes);
+                (path, opened)
+            }
+            StartSource::Import(name, buffer) => {
+                let bytes = Uint8Array::new(buffer.as_ref()).to_vec();
+                return match app.start_account_import(&name, &bytes) {
+                    Ok(()) => {
+                        self.exchange.borrow_mut().importing = Some(start.id);
+                        self.apply_start(app)
+                    }
+                    Err(error) => self.report_start(start.id, None, Err(error)),
+                };
+            }
         };
+        self.report_start(start.id, path, opened)
+    }
+
+    fn report_start(&self, id: String, path: Option<String>, opened: Result<(DocId, u64), String>) -> Result<(), String> {
         let message = packet("photocraft:account-started")?;
-        put(&message, "requestId", start.id)?;
+        put(&message, "requestId", id)?;
         put(&message, "ok", opened.is_ok())?;
         match opened {
             Ok((document, revision)) => {

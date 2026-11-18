@@ -524,7 +524,20 @@ impl eframe::App for WebShell {
             // as layers (as on the desktop), elsewhere opened.
             let places = self.app.dropped_on_canvas(ctx, &names);
             let target_doc = self.app.session.active().map(|st| st.doc.id);
-            let files: Vec<_> = dropped.into_iter().zip(names).zip(places).map(|((f, name), place)| (f, name, place, target_doc)).collect();
+            let files: Vec<_> = dropped.into_iter().zip(names).zip(places).filter_map(|((file, name), place)| {
+                if !place && !photocraft_ui_egui::preset_files_ui::is_preset_file(&name)
+                    && let Some(host) = self.host.as_ref()
+                {
+                    let opened = file.web_file().ok_or_else(|| "The browser did not provide the dropped file".to_owned())
+                        .and_then(|file| host.open_dropped_file(file));
+                    if let Err(error) = opened {
+                        self.app.open_failed(&name, &error);
+                    }
+                    None
+                } else {
+                    Some((file, name, place, target_doc))
+                }
+            }).collect();
             let (inbox, place_inbox) = (self.inbox.clone(), self.place_inbox.clone());
             let drop_reads = self.drop_reads.clone();
             drop_reads.set(drop_reads.get() + 1);

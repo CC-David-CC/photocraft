@@ -82,6 +82,9 @@ impl PhotocraftApp {
         if let Some(r) = preset_files_ui::open(self, name, bytes) {
             return r.map(|()| Vec::new());
         }
+        if self.services.account_save.is_some() && (!self.session.documents().is_empty() || self.account_import_pending()) {
+            return Err("Open imported files in a separate PhotoCraft account window".into());
+        }
         let name = &self.open_name(name);
         // Decoded on a worker: a tab with progress appears now, the document when it's ready
         // (warnings are shown then).

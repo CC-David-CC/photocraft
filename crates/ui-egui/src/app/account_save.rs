@@ -234,6 +234,39 @@ impl PhotocraftApp {
         Ok((state.doc.id, state.revision))
     }
 
+    /// Begin an untitled import using the native browser file decoder and its
+    /// normal memory, color profile and Camera Raw prompts.
+    pub fn start_account_import(&mut self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        if self.services.account_save.is_none() || !self.session.documents().is_empty() || self.account_import_pending() {
+            return Err("An import requires an empty PhotoCraft account editor".into());
+        }
+        if crate::preset_files_ui::is_preset_file(name) {
+            return Err("Use the PhotoCraft preset import controls for preset files".into());
+        }
+        self.open_bytes(name, bytes)?;
+        Ok(())
+    }
+
+    pub(super) fn account_import_pending(&self) -> bool {
+        !self.jobs.opens.is_empty() || !self.held_opens.is_empty() || !self.held_memory_prompts.is_empty()
+            || self.camera_raw.is_some() || !self.raw_shelf.is_empty()
+    }
+
+    /// Report only a finished native import. Its library bytes have no account
+    /// identity and must stay recoverable until an explicit account Save.
+    pub fn finish_account_import(&mut self) -> Result<Option<(DocId, u64)>, String> {
+        if self.account_import_pending() {
+            return Ok(None);
+        }
+        if self.session.documents().len() != 1 {
+            let reason = if self.ui.status_error { self.ui.status.as_str() } else { "The PhotoCraft import did not open a document" };
+            return Err(reason.into());
+        }
+        let state = self.session.active_mut().ok_or("The PhotoCraft import is unavailable")?;
+        state.saved_revision = 0;
+        Ok(Some((state.doc.id, state.revision)))
+    }
+
     /// Encode a browser-local recovery snapshot without saving the editor or
     /// acknowledging any server write. The caller owns the base Storage revision.
     pub fn capture_account_recovery(&self, document: DocId, revision: u64) -> Result<Vec<u8>, String> {

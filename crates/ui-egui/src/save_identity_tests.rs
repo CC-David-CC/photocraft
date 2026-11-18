@@ -56,6 +56,30 @@ fn account_open_adopts_the_decoded_project_once_and_never_opens_invalid_bytes() 
 }
 
 #[test]
+fn account_import_uses_the_native_decoder_without_a_saved_binding() {
+    let mut source = app();
+    let original = &source.session.active().unwrap().doc;
+    let bytes = photocraft_format::save_to_bytes(original, &Default::default()).unwrap();
+    let mut editor = PhotocraftApp::new(
+        Session::new(),
+        Services { import: source.services.import.take(), account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() },
+    );
+    assert!(editor.start_account_import("Broken.png", b"broken").is_err());
+    assert!(editor.session.documents().is_empty());
+    editor.start_account_import("Local.pcraft", &bytes).unwrap();
+    let (id, revision) = editor.finish_account_import().unwrap().unwrap();
+    let live = editor.session.active().unwrap();
+    assert_eq!(live.path, None);
+    assert_eq!(live.doc.size, original.size);
+    assert_eq!(live.doc.layers.len(), original.layers.len());
+    assert!(live.is_dirty());
+    assert!(editor.capture_account_recovery(id, revision).is_ok());
+    assert!(editor.open_bytes("Second.pcraft", &bytes).is_err());
+    assert_eq!(editor.session.documents().len(), 1);
+    assert_eq!(editor.session.active().unwrap().doc.id, id);
+}
+
+#[test]
 fn account_open_creates_a_clean_untitled_document_through_file_new() {
     let mut editor =
         PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
