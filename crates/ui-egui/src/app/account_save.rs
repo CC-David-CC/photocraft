@@ -180,6 +180,28 @@ impl PhotocraftApp {
         Ok(true)
     }
 
+    /// The user explicitly chose Save while ending the session. An ordinary
+    /// pending Type edit can be committed by that choice. Live IME composition
+    /// and other unfinished tools must keep their native editing state.
+    pub fn begin_account_session_save(&mut self, document: DocId, revision: u64, path: &str) -> Result<bool, String> {
+        validate_path(path)?;
+        let Some(state) = self.account_project_state() else { return Ok(false) };
+        if state.document != document || state.revision != revision || !state.dirty || state.operation_pending
+            || !self.session.active().is_some_and(|st| st.path.as_deref().is_none_or(|current| current == path))
+        {
+            return Ok(false);
+        }
+        if state.unfinished_edit {
+            if !state.capturable || self.ui.text_edit.is_none() {
+                return Err("Finish or cancel the active PhotoCraft edit before saving.".into());
+            }
+            crate::type_tool::commit(self);
+        }
+        let settings = self.save_settings();
+        self.write_document(path.to_owned(), &settings, false)?;
+        Ok(true)
+    }
+
     /// Start the initial account view with a native blank or a saved project.
     /// An account path represents a Storage resource and never a local path.
     pub fn start_account_document(&mut self, project: Option<(&str, &[u8])>, new_settings: Option<serde_json::Value>) -> Result<(DocId, u64), String> {

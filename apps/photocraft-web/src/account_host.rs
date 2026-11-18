@@ -70,6 +70,20 @@ fn fields(object: &Object, request: &AccountSaveRequest) -> Result<(), String> {
     put(object, "path", request.path.as_str())
 }
 
+fn project_fields(object: &Object, state: Option<AccountProjectState>) -> Result<(), String> {
+    put(object, "available", state.is_some())?;
+    if let Some(state) = state {
+        put(object, "documentId", state.document.0.to_string())?;
+        put(object, "revision", state.revision.to_string())?;
+        put(object, "dirty", state.dirty)?;
+        put(object, "capturable", state.capturable)?;
+        put(object, "autosaveEligible", state.autosave_eligible)?;
+        put(object, "operationPending", state.operation_pending)?;
+        put(object, "unfinishedEdit", state.unfinished_edit)?;
+    }
+    Ok(())
+}
+
 struct StartRequest {
     id: String,
     project: Option<(Option<String>, ArrayBuffer)>,
@@ -126,8 +140,8 @@ struct Exchange {
     close_approved: bool,
     recovery: Option<RecoveryRequest>,
     project_state: Option<AccountProjectState>,
-    autosave: Option<AutosaveRequest>,
-    dispatching_autosave: Option<String>,
+    save_capture: Option<SaveCaptureRequest>,
+    dispatching_capture: Option<SaveCaptureRequest>,
     session_commands: VecDeque<SessionRequest>,
     session_lease: Option<String>,
     session_finalized: bool,
@@ -165,9 +179,19 @@ impl SessionRequest {
     }
 }
 
-struct AutosaveRequest {
+struct SaveCaptureRequest {
     project: RecoveryRequest,
     path: String,
+    session_save: bool,
+}
+
+impl SaveCaptureRequest {
+    fn result_packet(&self) -> Result<Object, String> {
+        let message = packet(if self.session_save {"photocraft:account-session-save-result"} else {"photocraft:account-autosave-result"})?;
+        put(&message, "requestId", self.project.id.as_str())?;
+        put(&message, "reviewedRevision", self.project.revision.to_string())?;
+        Ok(message)
+    }
 }
 
 struct RecoveryRequest {
@@ -290,12 +314,13 @@ impl AccountHost {
                     }
                     return;
                 }
-                Some("photocraft:account-autosave") => {
-                    if inbox.started && !inbox.close_approved && inbox.autosave.is_none()
+                Some("photocraft:account-autosave" | "photocraft:account-session-save") => {
+                    if inbox.started && !inbox.close_approved && inbox.save_capture.is_none()
                         && let Some(project) = RecoveryRequest::read(&data)
                         && let Some(path) = text(&data, "path").filter(|path| !path.is_empty() && path.len() <= 2048)
                     {
-                        inbox.autosave = Some(AutosaveRequest {project, path});
+                        let session_save = kind.as_deref() == Some("photocraft:account-session-save");
+                        inbox.save_capture = Some(SaveCaptureRequest {project, path, session_save});
                         wake.request_repaint();
                     }
                     return;
@@ -341,9 +366,8 @@ impl AccountHost {
             if exchange.pending.is_some() {
                 return Err("An account save is awaiting a result".into());
             }
-            let message = if let Some(id) = &exchange.dispatching_autosave {
-                let message = packet("photocraft:account-autosave-result")?;
-                put(&message, "requestId", id.as_str())?;
+            let message = if let Some(capture) = &exchange.dispatching_capture {
+                let message = capture.result_packet()?;
                 put(&message, "outcome", "captured")?;
                 message
             } else {
@@ -433,7 +457,7 @@ impl AccountHost {
             let (operation, result) = match request.operation {
                 SessionOperation::Pause {document, revision, dirty, unfinished_edit} => {
                     let ready = !exchange.close_approved && exchange.close.is_none() && !exchange.session_finalized
-                        && exchange.session_lease.is_none() && exchange.autosave.is_none()
+                        && exchange.session_lease.is_none() && exchange.save_capture.is_none()
                         && !browser_work_pending();
                     ("pause", if ready {
                         app.check_account_pause(document, revision, dirty, unfinished_edit)
@@ -525,36 +549,32 @@ impl AccountHost {
             return Ok(());
         }
         let message = packet("photocraft:account-project-state")?;
-        put(&message, "available", state.is_some())?;
-        if let Some(state) = state {
-            put(&message, "documentId", state.document.0.to_string())?;
-            put(&message, "revision", state.revision.to_string())?;
-            put(&message, "dirty", state.dirty)?;
-            put(&message, "capturable", state.capturable)?;
-            put(&message, "autosaveEligible", state.autosave_eligible)?;
-            put(&message, "operationPending", state.operation_pending)?;
-            put(&message, "unfinishedEdit", state.unfinished_edit)?;
-        }
+        project_fields(&message, state)?;
         self.parent.send(&message, &Array::new())?;
         exchange.project_state = state;
         Ok(())
     }
 
-    pub fn apply_autosave(&self, app: &mut PhotocraftApp) -> Result<(), String> {
-        let Some(request) = self.exchange.borrow_mut().autosave.take() else { return Ok(()) };
-        let RecoveryRequest {id, document, revision} = request.project;
-        self.exchange.borrow_mut().dispatching_autosave = Some(id.clone());
-        let outcome = app.begin_account_autosave(document, revision, &request.path);
-        self.exchange.borrow_mut().dispatching_autosave = None;
+    pub fn apply_save_capture(&self, app: &mut PhotocraftApp) -> Result<(), String> {
+        let Some(request) = self.exchange.borrow_mut().save_capture.take() else { return Ok(()) };
+        let (document, revision) = (request.project.document, request.project.revision);
+        let path = request.path.clone();
+        let session_save = request.session_save;
+        self.exchange.borrow_mut().dispatching_capture = Some(request);
+        let outcome = if session_save {
+            app.begin_account_session_save(document, revision, &path)
+        } else {
+            app.begin_account_autosave(document, revision, &path)
+        };
+        let request = self.exchange.borrow_mut().dispatching_capture.take().ok_or("The PhotoCraft save capture changed")?;
         if outcome == Ok(true) {
             // The ordinary save writer already transferred bytes and the ticket.
             return Ok(());
         }
-        let message = packet("photocraft:account-autosave-result")?;
-        put(&message, "requestId", id)?;
+        let message = request.result_packet()?;
         put(&message, "documentId", document.0.to_string())?;
         put(&message, "revision", revision.to_string())?;
-        put(&message, "path", request.path)?;
+        put(&message, "path", path)?;
         if let Err(error) = outcome {
             put(&message, "outcome", "failed")?;
             put(&message, "message", error)?;
@@ -578,6 +598,9 @@ impl AccountHost {
         let message = packet("photocraft:account-save-settled")?;
         fields(&message, &request)?;
         put(&message, "adopted", adopted.is_ok())?;
+        let state = Object::new();
+        project_fields(&state, app.account_project_state())?;
+        put(&message, "projectState", state)?;
         if let Err(error) = adopted {
             put(&message, "message", error)?;
         }

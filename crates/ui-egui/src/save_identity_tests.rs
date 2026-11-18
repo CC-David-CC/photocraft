@@ -210,6 +210,33 @@ fn account_session_pause_checks_the_reviewed_revision_and_pending_native_work() 
 }
 
 #[test]
+fn account_session_save_requires_review_and_can_commit_an_ordinary_type_edit() {
+    let mut source = app();
+    let request = Rc::new(RefCell::new(None));
+    let received = request.clone();
+    source.services.account_save = Some(Box::new(move |ticket, _| {
+        *received.borrow_mut() = Some(ticket.clone());
+        Ok(())
+    }));
+    let layer = source.run("type.create", json!({"text":"Before","x":1,"y":2})).unwrap()["layer"].as_u64().unwrap();
+    crate::type_tool::edit_active(&mut source).unwrap();
+    let key = source.ui.text_edit.as_ref().unwrap().session.clone();
+    source.run("type.edit",json!({"layer":layer,"text":"Reviewed","coalesce":key})).unwrap();
+    let current = source.account_project_state().unwrap();
+    let path = "Pictures/Reviewed.pcraft";
+    assert!(!source.begin_account_session_save(current.document,current.revision - 1,path).unwrap());
+    assert!(source.ui.text_edit.is_some());
+    assert!(source.begin_account_session_save(current.document,current.revision,path).unwrap());
+    assert!(source.ui.text_edit.is_none());
+    assert!(source.session.active().unwrap().is_dirty());
+    let save = request.borrow().clone().unwrap();
+    assert_eq!(save.document,current.document);
+    assert_eq!(save.path,path);
+    source.finish_account_save(&save,Ok(()),&egui::Context::default()).unwrap();
+    assert!(!source.session.active().unwrap().is_dirty());
+}
+
+#[test]
 fn account_save_captures_real_layered_bytes_and_adopts_only_the_confirmed_revision() {
     let mut app = app();
     let out = Rc::new(RefCell::new(None));
