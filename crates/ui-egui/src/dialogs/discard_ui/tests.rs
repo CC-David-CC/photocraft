@@ -19,6 +19,87 @@ fn doc_id(app: &PhotocraftApp, i: usize) -> DocId {
 }
 
 #[test]
+fn account_close_approves_clean_projects_and_leaves_dirty_projects_until_the_desktop_commits() {
+    let mut app = app_with_docs(2);
+    app.services.account_save = Some(Box::new(|_, _| Ok(())));
+    let ctx = egui::Context::default();
+    app.request_account_close(true).unwrap();
+    assert_eq!(app.account_close_outcome(), Some(true));
+
+    make_dirty(&mut app, 0);
+    make_dirty(&mut app, 1);
+    assert!(app.request_account_close(false).is_err());
+    app.request_account_close(true).unwrap();
+    assert_eq!(app.account_close_outcome(), None);
+    let first = doc_id(&app, 0);
+    apply(&mut app, &ctx, first, Answer::Discard, false).unwrap();
+    let second = doc_id(&app, 1);
+    apply(&mut app, &ctx, second, Answer::Cancel, false).unwrap();
+    assert_eq!(app.account_close_outcome(), Some(false));
+    assert!(app.session.documents().iter().all(|doc| doc.is_dirty()));
+
+    app.request_account_close(true).unwrap();
+    apply(&mut app, &ctx, first, Answer::Discard, false).unwrap();
+    make_dirty(&mut app, 0);
+    apply(&mut app, &ctx, second, Answer::Discard, false).unwrap();
+    assert_eq!(app.account_close_outcome(), None, "a later edit needs its own approval");
+    apply(&mut app, &ctx, first, Answer::Discard, false).unwrap();
+    assert_eq!(app.account_close_outcome(), Some(true));
+    assert_eq!(app.session.documents().len(), 2);
+}
+
+#[test]
+fn account_close_requires_the_exact_successful_save_for_the_captured_revision() {
+    let mut app = app_with_docs(1);
+    let request = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let capture = request.clone();
+    app.services.account_save = Some(Box::new(move |ticket, _| {
+        *capture.borrow_mut() = Some(ticket.clone());
+        Ok(())
+    }));
+    app.services.export = Some(Box::new(|doc, _, _| {
+        let bytes = photocraft_format::save_to_bytes(doc, &Default::default()).map_err(|error| error.to_string())?;
+        Ok((bytes, Vec::new()))
+    }));
+    app.session.active_mut().unwrap().path = Some("Pictures/Layered.pcraft".into());
+    make_dirty(&mut app, 0);
+    let ctx = egui::Context::default();
+    app.request_account_close(true).unwrap();
+    let doc = doc_id(&app, 0);
+    apply(&mut app, &ctx, doc, Answer::Save, false).unwrap();
+    let first = request.borrow_mut().take().unwrap();
+    assert_eq!(app.account_close_outcome(), None);
+    assert!(app.finish_account_save(&first, Err("Write conflict".into()), &ctx).is_err());
+    assert_eq!(app.account_close_outcome(), None);
+
+    apply(&mut app, &ctx, doc, Answer::Save, false).unwrap();
+    let second = request.borrow_mut().take().unwrap();
+    make_dirty(&mut app, 0);
+    app.finish_account_save(&second, Ok(()), &ctx).unwrap();
+    assert_eq!(app.account_close_outcome(), None);
+
+    apply(&mut app, &ctx, doc, Answer::Save, false).unwrap();
+    let third = request.borrow_mut().take().unwrap();
+    app.account_save_uncertain();
+    assert_eq!(app.account_close_outcome(), Some(false));
+    assert!(app.saving() && app.session.active().unwrap().is_dirty());
+    assert!(app.request_account_close(true).is_err());
+    app.finish_account_save(&third, Ok(()), &ctx).unwrap();
+    app.request_account_close(true).unwrap();
+    assert_eq!(app.account_close_outcome(), Some(true));
+    assert!(!app.session.active().unwrap().is_dirty());
+
+    make_dirty(&mut app, 0);
+    app.request_account_close(true).unwrap();
+    apply(&mut app, &ctx, doc, Answer::Save, false).unwrap();
+    let last = request.borrow_mut().take().unwrap();
+    assert_eq!(app.account_close_outcome(), None);
+    app.finish_account_save(&last, Ok(()), &ctx).unwrap();
+    assert_eq!(app.account_close_outcome(), Some(true));
+    assert!(!app.session.active().unwrap().is_dirty());
+}
+
+#[test]
 fn a_save_document_script_that_edits_the_document_keeps_the_prompt_up() {
     use photocraft_engine::automate_cmds::ScriptBinding;
     let mut app = app_with_docs(1);

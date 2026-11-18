@@ -39,6 +39,7 @@ struct Pending {
 pub(crate) struct AccountSaveState {
     last_ticket: u64,
     pending: Option<Pending>,
+    pub(crate) close_approved: bool,
 }
 
 impl AccountSaveState {

@@ -548,6 +548,8 @@ pub struct Services {
     pub account_save: Option<crate::AccountSaveFn>,
     /// Ask the host to open a WebOS project or choose its save destination.
     pub account_dialog: Option<crate::AccountDialogFn>,
+    /// Ask the owning Desktop to close the embedded editor window.
+    pub account_window_close: Option<Box<dyn Fn() -> Result<(), String>>>,
     /// Explicit interactive SVG smart-object editing; unavailable in browser and automation.
     pub open_external_svg: Option<OpenExternalSvgFn>,
     /// User-initiated desktop/browser pixel sampling.

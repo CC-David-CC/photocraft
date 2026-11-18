@@ -13,6 +13,7 @@ use crate::PhotocraftApp;
 use crate::widgets::{ButtonRole, DialogButton};
 
 const EXIT: &str = "file.exit";
+const ACCOUNT_CLOSE: &str = "account.prepareClose";
 
 /// An action waiting on the user, and the dirty documents still to ask about.
 pub struct Prompt {
@@ -31,6 +32,9 @@ pub struct Prompt {
     auto_answered: Option<DocId>,
     /// `auto` came from a control client (`saveAll`): its Saves are judged as automation.
     auto_control: bool,
+    /// Document revisions explicitly answered for a hosted close. Keep all
+    /// documents mounted until the Desktop commits the window close.
+    account_answers: Vec<(DocId, u64)>,
 }
 
 fn index_of(app: &PhotocraftApp, id: DocId) -> Option<usize> {
@@ -51,6 +55,7 @@ const DISCARDING: &[(&str, Reach)] = &[
     ("file.revert", Reach::Target),
     ("file.closeOthers", Reach::AllButTarget),
     ("file.closeAll", Reach::All),
+    (ACCOUNT_CLOSE, Reach::All),
     (EXIT, Reach::All),
 ];
 
@@ -97,6 +102,7 @@ pub fn intercept(app: &mut PhotocraftApp, id: &str, params: &Value) -> bool {
         auto: None,
         auto_answered: None,
         auto_control: false,
+        account_answers: Vec::new(),
     };
     match &app.discard {
         None => ask(app, prompt),
@@ -129,10 +135,70 @@ fn show_tab(app: &mut PhotocraftApp, doc: Option<DocId>) {
 }
 
 impl PhotocraftApp {
+    /// Begin the same native close prompt without removing documents. The
+    /// Desktop owns destruction of the embedded view after approval.
+    pub fn request_account_close(&mut self, interactive: bool) -> Result<(), String> {
+        if self.services.account_save.is_none() {
+            return Err("Only an account editor can prepare a hosted close".into());
+        }
+        if self.saving() || !self.session.jobs().is_empty() || self.file_dialog_open() || self.discard.is_some() {
+            return Err("Finish the active PhotoCraft operation before closing.".into());
+        }
+        if self.account_edit_in_progress() {
+            return Err("Finish or cancel the current PhotoCraft edit before closing.".into());
+        }
+        self.account_save.close_approved = false;
+        if !interactive && self.has_unsaved_work() {
+            return Err("Close PhotoCraft and review its unsaved changes before signing out.".into());
+        }
+        if !intercept(self, ACCOUNT_CLOSE, &Value::Null) {
+            self.account_save.close_approved = true;
+        }
+        Ok(())
+    }
+
+    fn account_edit_in_progress(&self) -> bool {
+        self.drag.is_some()
+            || self.live_stroke.is_some()
+            || self.ui.text_edit.is_some()
+            || self.type_box_preview.is_some()
+            || self.type_transform_preview.is_some()
+            || self.transform_preparing.is_some()
+            || self.transform_preview.is_some()
+            || !self.remove_pending.is_empty()
+            || crate::crop_ui::pending(self)
+            || crate::perspective_crop_ui::pending(self)
+            || !self.ui.dialogs.is_empty()
+            || self.save_options_open()
+            || self.distort.active()
+            || self.distort.gallery.is_some()
+            || self.smart_svg.modal_open()
+            || self.camera_raw.is_some()
+            || self.wide_angle.is_some()
+            || crate::gradient_ui::editing(self)
+    }
+
+    /// A missing prompt with no approval means the user cancelled.
+    pub fn account_close_outcome(&self) -> Option<bool> {
+        self.discard.is_none().then_some(self.account_save.close_approved)
+    }
+
+    /// An uncertain write keeps its save ticket. Release the close prompt so
+    /// the editor can continue while the host verifies what happened.
+    pub fn account_save_uncertain(&mut self) {
+        if self.discard.as_ref().is_some_and(|prompt| prompt.id == ACCOUNT_CLOSE) {
+            self.discard = None;
+            self.account_save.close_approved = false;
+        }
+        self.ui.status = "The account save result is unconfirmed.".into();
+        self.ui.status_error = true;
+    }
+
     /// Whether closing now would lose work: a document has unsaved changes and closing wasn't
     /// confirmed. The web build has the browser ask before leaving the page while this holds (#1380).
     pub fn has_unsaved_work(&self) -> bool {
-        !self.allow_close && self.session.documents().iter().any(|d| d.is_dirty())
+        !self.allow_close
+            && (self.session.documents().iter().any(|d| d.is_dirty()) || self.services.account_save.is_some() && self.account_edit_in_progress())
     }
 }
 
@@ -168,11 +234,17 @@ fn advance(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let Some(p) = app.discard.as_mut() else { return };
     let answered = (!p.docs.is_empty()).then(|| p.docs.remove(0));
     let (next, one_by_one) = (p.docs.first().copied(), !matches!(reach(&p.id), Some(Reach::Target)));
+    let account_close = p.id == ACCOUNT_CLOSE;
     // Close All, Close Others and quitting close each document once it is answered, as Photoshop
     // does, and show the next one asked about: otherwise the tab just answered stays up and it
     // looks like it is being asked about again (#2547). Cancel then keeps only the unanswered ones.
     if one_by_one {
-        if let Some(i) = answered.and_then(|d| index_of(app, d))
+        if account_close {
+            if let Some(doc) = answered && let Some(i) = index_of(app, doc) {
+                let revision = app.session.documents()[i].revision;
+                app.discard.as_mut().unwrap().account_answers.push((doc, revision));
+            }
+        } else if let Some(i) = answered.and_then(|d| index_of(app, d))
             && let Err(e) = crate::menus::invoke_unguarded(app, ctx, "file.close", json!({"document": i}))
         {
             app.ui.status = e;
@@ -192,6 +264,7 @@ fn advance(app: &mut PhotocraftApp, ctx: &egui::Context) {
             .documents()
             .iter()
             .filter(|d| d.is_dirty() && (matches!(reach(&id), Some(Reach::All)) || Some(d.doc.id) != target))
+            .filter(|d| !account_close || !p.account_answers.contains(&(d.doc.id, d.revision)))
             .map(|d| d.doc.id)
             .collect();
         if !rest.is_empty() {
@@ -205,6 +278,10 @@ fn advance(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
     }
     let Some(Prompt { id, mut params, target, .. }) = app.discard.take() else { return };
+    if account_close {
+        app.account_save.close_approved = true;
+        return;
+    }
     if id == EXIT {
         app.allow_close = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);

@@ -69,6 +69,12 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
     {
         authorize(id, &params)?;
     }
+    if matches!(id, "file.close" | "file.closeAll" | "file.exit")
+        && let Some(close) = app.services.account_window_close.as_ref()
+    {
+        close()?;
+        return Ok(Value::Null);
+    }
     // A held Type box handle applies its box before any command that may read or edit the
     // document runs; a command that edits it first would make the drag's box stale and lose it.
     if !keeps_box_drag(id) {

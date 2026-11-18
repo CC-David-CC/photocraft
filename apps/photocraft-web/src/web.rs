@@ -130,6 +130,7 @@ pub fn start() {
                         let (host, writer) = AccountHost::install(parent, &cc.egui_ctx)?;
                         services.account_save = Some(writer);
                         services.account_dialog = Some(host.dialog());
+                        services.account_window_close = Some(Box::new(host.request_window_close()));
                         services.write_unconfirmed = false;
                         host.ready()?;
                         Some(host)
@@ -150,7 +151,7 @@ pub fn start() {
                     }
                     let unsaved = Arc::new(AtomicBool::new(false));
                     guard_unload(unsaved.clone());
-                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, ui_language: "", host }))
+                    Ok(Box::new(WebShell { app, inbox, place_inbox, drop_reads: Rc::default(), unsaved, served, database, presets, ui_language: "", host }))
                 }),
             )
             .await;
@@ -381,6 +382,7 @@ struct WebShell {
     inbox: Inbox,
     /// Dropped files to place on the active document's canvas.
     place_inbox: PlaceInbox,
+    drop_reads: Rc<Cell<usize>>,
     /// Read by the `beforeunload` listener ([`guard_unload`]).
     unsaved: Arc<AtomicBool>,
     served: Served,
@@ -391,6 +393,22 @@ struct WebShell {
 }
 
 impl WebShell {
+    fn closing(&mut self, ctx: &egui::Context) -> bool {
+        let Some(host) = self.host.as_ref() else { return false };
+        let browser_work_pending = || self.drop_reads.get() != 0
+            || ctx.input(|i| !i.raw.dropped_files.is_empty())
+            || !self.inbox.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+            || !self.place_inbox.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+            || self.presets.unsaved();
+        match host.apply_close(&mut self.app, browser_work_pending) {
+            Ok(closing) => closing,
+            Err(error) => {
+                log::warn!("PhotoCraft could not report its account close result: {error}");
+                false
+            }
+        }
+    }
+
     fn save_presets(&mut self, ctx: &egui::Context) {
         if let Some(db) = self.database.clone()
             && let Some(batch) = self.presets.begin()
@@ -472,6 +490,9 @@ impl eframe::App for WebShell {
                 log::warn!("PhotoCraft could not report its account save result: {error}");
             }
         }
+        if self.closing(ctx) {
+            return;
+        }
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         if !dropped.is_empty() {
             let names: Vec<String> =
@@ -482,6 +503,8 @@ impl eframe::App for WebShell {
             let target_doc = self.app.session.active().map(|st| st.doc.id);
             let files: Vec<_> = dropped.into_iter().zip(names).zip(places).map(|((f, name), place)| (f, name, place, target_doc)).collect();
             let (inbox, place_inbox) = (self.inbox.clone(), self.place_inbox.clone());
+            let drop_reads = self.drop_reads.clone();
+            drop_reads.set(drop_reads.get() + 1);
             let ctx = ctx.clone();
             // One after another, so they open or place in the order they were dropped.
             wasm_bindgen_futures::spawn_local(async move {
@@ -508,6 +531,8 @@ impl eframe::App for WebShell {
                         Err(e) => log::error!("couldn't read dropped file {name}: {e}"),
                     }
                 }
+                drop_reads.set(drop_reads.get() - 1);
+                ctx.request_repaint();
             });
         }
         self.serve_fonts(ctx);
@@ -517,6 +542,9 @@ impl eframe::App for WebShell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.closing(ui.ctx()) {
+            return;
+        }
         // Only while a preset change is unsaved. Storage the browser denies from the start (a
         // sandboxed iframe, blocked site data) loses nothing until the first change, and that
         // change brings the banner with the reason.
@@ -543,6 +571,7 @@ impl eframe::App for WebShell {
         self.app.ui_frame(ui, frame);
         self.save_presets(ui.ctx());
         self.app.finish_type_reset_pass(ui.ctx());
+        self.closing(ui.ctx());
     }
 }
 

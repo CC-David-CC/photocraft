@@ -107,6 +107,15 @@ struct Exchange {
     dialog: Option<PendingDialog>,
     pending: Option<AccountSaveRequest>,
     reply: Option<Result<(), String>>,
+    save_uncertain: bool,
+    close: Option<CloseRequest>,
+    close_approved: bool,
+}
+
+struct CloseRequest {
+    id: String,
+    interactive: bool,
+    started: bool,
 }
 
 struct PendingDialog {
@@ -175,6 +184,16 @@ impl AccountHost {
                     receive_dialog(&mut inbox, &data);
                     return;
                 }
+                Some("photocraft:account-close") => {
+                    if inbox.started && inbox.close.is_none() && !inbox.close_approved
+                        && let Some(id) = text(&data, "requestId").filter(|id| id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+                        && let Some(interactive) = field(&data, "interactive").and_then(|value| value.as_bool())
+                    {
+                        inbox.close = Some(CloseRequest { id, interactive, started: false });
+                        wake.request_repaint();
+                    }
+                    return;
+                }
                 _ => return,
             }
             let Some(request) = inbox.pending.as_ref() else { return };
@@ -192,7 +211,11 @@ impl AccountHost {
                 Some("failed") => Err(text(&data, "message")
                     .filter(|message| !message.is_empty() && message.len() <= 1024)
                     .unwrap_or_else(|| "The account write failed".into())),
-                // An uncertain write remains pending until the host has a verified result.
+                Some("unknown") => {
+                    inbox.save_uncertain = true;
+                    wake.request_repaint();
+                    return;
+                }
                 _ => return,
             };
             inbox.reply = Some(result);
@@ -236,6 +259,49 @@ impl AccountHost {
         })
     }
 
+    pub fn request_window_close(&self) -> impl Fn() -> Result<(), String> + use<> {
+        let parent = self.parent.clone();
+        move || parent.send(&packet("photocraft:account-close-intent")?, &Array::new())
+    }
+
+    /// Tick before native input and again after the prompt has drawn.
+    /// Once approved, stop running the embedded editor until its owner removes it.
+    pub fn apply_close(&self, app: &mut PhotocraftApp, browser_work_pending: impl Fn() -> bool) -> Result<bool, String> {
+        let mut exchange = self.exchange.borrow_mut();
+        if exchange.close_approved {
+            return Ok(true);
+        }
+        let Some(close) = exchange.close.as_mut() else { return Ok(false) };
+        let outcome = if close.started {
+            app.account_close_outcome().map(Ok)
+        } else {
+            close.started = true;
+            if browser_work_pending() {
+                Some(Err("Wait for the current PhotoCraft browser operation to finish.".into()))
+            } else {
+                match app.request_account_close(close.interactive) {
+                    Ok(()) => app.account_close_outcome().map(Ok),
+                    Err(error) => Some(Err(error)),
+                }
+            }
+        };
+        let Some(mut outcome) = outcome else { return Ok(false) };
+        if outcome == Ok(true) && browser_work_pending() {
+            outcome = Err("Wait for the current PhotoCraft browser operation to finish.".into());
+        }
+        let interactive = close.interactive;
+        let message = packet("photocraft:account-close-result")?;
+        put(&message, "requestId", close.id.as_str())?;
+        match &outcome {
+            Ok(approved) => put(&message, "approved", *approved)?,
+            Err(error) => put(&message, "message", error.as_str())?,
+        }
+        self.parent.send(&message, &Array::new())?;
+        exchange.close = None;
+        exchange.close_approved = interactive && outcome == Ok(true);
+        Ok(exchange.close_approved)
+    }
+
     pub fn apply_start(&self, app: &mut PhotocraftApp) -> Result<(), String> {
         let Some(start) = self.exchange.borrow_mut().start.take() else { return Ok(()) };
         let mut path = None;
@@ -264,6 +330,9 @@ impl AccountHost {
     pub fn apply_save_result(&self, app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
         let Some((request, result)) = ({
             let mut exchange = self.exchange.borrow_mut();
+            if std::mem::take(&mut exchange.save_uncertain) {
+                app.account_save_uncertain();
+            }
             exchange.reply.take().and_then(|result| exchange.pending.take().map(|request| (request, result)))
         }) else {
             return Ok(());
