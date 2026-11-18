@@ -60,6 +60,11 @@ mkdir -p "$WORK/$NAME/app"
 cp -R "$BOOT/." "$WORK/$NAME/"
 # The boot module imports the app's glue by this name (it can't know Trunk's content hash).
 cp "$GLUE" "$WORK/$NAME/app/photocraft-web.js"
+# wasm-bindgen's generated imports are relative to the app glue. The boot
+# crate's own snippets live at the site root and do not satisfy those imports.
+if [[ -d "$APP/snippets" ]]; then
+  cp -R "$APP/snippets" "$WORK/$NAME/app/"
+fi
 # The parts keep the content hash, so they can be cached forever. Their extension is one no
 # server knows: a server that recognised gzip might decode it or label it, and the page inflates
 # the parts itself.
