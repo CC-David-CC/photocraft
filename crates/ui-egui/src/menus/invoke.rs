@@ -370,18 +370,14 @@ fn invoke_file_commands(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, 
             Ok(Value::Null)
         }
         id if id.starts_with("file.openRecent.") => {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                match id.rsplit('.').next().and_then(|s| s.parse::<usize>().ok()).and_then(|i| app.ui.recent_files.get(i).cloned()) {
-                    Some(p) => open_path(app, &p),
-                    None => Err("no such recent file".to_string()),
-                }
-            }
             #[cfg(target_arch = "wasm32")]
-            {
-                let _ = app;
+            if app.services.account_dialog.is_none() {
                 let message = "Open Recent is unavailable on the web";
-                Err(tl!(message).to_string())
+                return Err(tl!(message).to_string());
+            }
+            match id.rsplit('.').next().and_then(|s| s.parse::<usize>().ok()).and_then(|i| app.ui.recent_files.get(i).cloned()) {
+                Some(p) => open_path(app, &p),
+                None => Err("no such recent file".to_string()),
             }
         }
         "file.saveAs" => {

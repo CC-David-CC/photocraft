@@ -33,6 +33,16 @@ pub enum FileDialogRequest {
     Save { suggested: String },
 }
 
+pub enum AccountDialogRequest {
+    Open { path: Option<String> },
+    Save { suggested: String },
+}
+
+enum DialogRequest {
+    Local(FileDialogRequest),
+    Account(AccountDialogRequest),
+}
+
 /// The user's choice (a cancelled dialog answers `None`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileDialogAnswer {
@@ -70,6 +80,7 @@ impl FileDialogReply {
 /// Show a file dialog and return at once, answering through the reply when the user is done.
 /// The window (`None` in tests) is the dialog's parent.
 pub type FileDialogFn = Box<dyn FnMut(FileDialogRequest, Option<&eframe::Frame>, FileDialogReply)>;
+pub type AccountDialogFn = Box<dyn FnMut(AccountDialogRequest, FileDialogReply)>;
 
 /// What to do with the answer (`None`: cancelled).
 type Then = Box<dyn FnOnce(&mut PhotocraftApp, Option<FileDialogAnswer>) -> Result<Value, String>>;
@@ -80,7 +91,7 @@ type SavedPath = Box<dyn Fn(&PhotocraftApp, &str) -> String>;
 /// The file dialog in progress.
 pub(crate) struct Pending {
     /// Not shown yet: it is shown at the end of the frame, which has the window to parent it to.
-    request: Option<FileDialogRequest>,
+    request: Option<DialogRequest>,
     answer: Option<Receiver<Option<FileDialogAnswer>>>,
     then: Then,
     /// For a save dialog, the path the save writes to for the dialog's answer.
@@ -111,14 +122,23 @@ impl PhotocraftApp {
         if self.services.file_dialog.is_none() {
             return Err(CANCELLED.into());
         }
-        if self.file_dialog.is_some() {
-            return Err("a file dialog is already open".into());
-        }
         let kind = match request {
             FileDialogRequest::Open { .. } => "open",
             FileDialogRequest::Folder { .. } => "folder",
             FileDialogRequest::Save { .. } => "save",
         };
+        self.ask_dialog(DialogRequest::Local(request), kind, then)
+    }
+
+    fn ask_dialog(
+        &mut self,
+        request: DialogRequest,
+        kind: &str,
+        then: impl FnOnce(&mut Self, FileDialogAnswer) -> Result<Value, String> + 'static,
+    ) -> Result<Value, String> {
+        if self.file_dialog.is_some() {
+            return Err("a file dialog is already open".into());
+        }
         let then: Then = Box::new(move |app, answer| match answer {
             None => Err(CANCELLED.into()),
             Some(FileDialogAnswer::Unavailable(why)) => Err(why),
@@ -149,6 +169,23 @@ impl PhotocraftApp {
     /// the document the dialog was asked for.
     pub(crate) fn pick_save(&mut self, suggested: &str, then: impl FnOnce(&mut Self, String) -> Result<Value, String> + 'static) -> Result<Value, String> {
         self.pick_save_in(suggested, false, then)
+    }
+
+    /// Ask the parent desktop for the destination of an editable account project.
+    /// Storage decides whether the file can be created or replaced.
+    pub(crate) fn pick_project_save(
+        &mut self,
+        suggested: &str,
+        then: impl FnOnce(&mut Self, String) -> Result<Value, String> + 'static,
+    ) -> Result<Value, String> {
+        if self.services.account_dialog.is_none() {
+            return self.pick_save(suggested, then);
+        }
+        let request = AccountDialogRequest::Save { suggested: suggested.to_owned() };
+        self.ask_dialog(DialogRequest::Account(request), "save", move |app, answer| match answer {
+            FileDialogAnswer::SaveTo(path) => then(app, path),
+            _ => Err(UNEXPECTED.into()),
+        })
     }
 
     /// [`Self::pick_save`] for the export flows (Export As, Quick Export, Save for Web, ...): starts in
@@ -280,6 +317,9 @@ impl PhotocraftApp {
 
     /// File › Open: opens every chosen file, reporting each failure (see [`Self::open_paths`]).
     pub fn open_dialog_file(&mut self) -> Result<Value, String> {
+        if self.services.account_dialog.is_some() {
+            return self.open_account_project(None);
+        }
         let initial_dir = last_used_dir(&self.ui.recent_files);
         self.ask_file(FileDialogRequest::Open { multiple: true, initial_dir, extensions: None }, |app, answer| {
             match answer {
@@ -293,6 +333,11 @@ impl PhotocraftApp {
             }
             Ok(Value::Null)
         })
+    }
+
+    pub(crate) fn open_account_project(&mut self, path: Option<&str>) -> Result<Value, String> {
+        let request = AccountDialogRequest::Open { path: path.map(str::to_owned) };
+        self.ask_dialog(DialogRequest::Account(request), "open", |_, _| Ok(Value::Null))
     }
 
     /// File › Open as Smart Object…: the File › Open dialog (same filters, several files); each
@@ -382,8 +427,18 @@ impl PhotocraftApp {
         if let Some(request) = p.request.take() {
             let (tx, rx) = mpsc::channel();
             p.answer = Some(rx);
-            if let Some(show) = self.services.file_dialog.as_mut() {
-                show(request, parent, FileDialogReply { tx, ctx: ctx.clone() });
+            let reply = FileDialogReply { tx, ctx: ctx.clone() };
+            match request {
+                DialogRequest::Local(request) => {
+                    if let Some(show) = self.services.file_dialog.as_mut() {
+                        show(request, parent, reply);
+                    }
+                }
+                DialogRequest::Account(request) => {
+                    if let Some(show) = self.services.account_dialog.as_mut() {
+                        show(request, reply);
+                    }
+                }
             }
         }
         let answer = match p.answer.as_ref().map(Receiver::try_recv) {

@@ -546,6 +546,8 @@ pub type LastUpdateFn = fn() -> Option<Result<String, String>>;
 pub struct Services {
     /// Hand off encoded account project bytes and wait for a durable result.
     pub account_save: Option<crate::AccountSaveFn>,
+    /// Ask the host to open a WebOS project or choose its save destination.
+    pub account_dialog: Option<crate::AccountDialogFn>,
     /// Explicit interactive SVG smart-object editing; unavailable in browser and automation.
     pub open_external_svg: Option<OpenExternalSvgFn>,
     /// User-initiated desktop/browser pixel sampling.

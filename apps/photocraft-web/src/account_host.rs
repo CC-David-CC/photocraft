@@ -3,7 +3,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
-use photocraft_ui_egui::{AccountSaveFn, AccountSaveRequest, PhotocraftApp};
+use photocraft_ui_egui::{AccountDialogFn, AccountDialogRequest, AccountSaveFn, AccountSaveRequest, FileDialogAnswer, FileDialogReply, PhotocraftApp};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use web_sys::{MessageEvent, Window};
 
@@ -94,8 +94,36 @@ impl StartRequest {
 struct Exchange {
     start: Option<StartRequest>,
     started: bool,
+    last_dialog: u64,
+    dialog: Option<PendingDialog>,
     pending: Option<AccountSaveRequest>,
     reply: Option<Result<(), String>>,
+}
+
+struct PendingDialog {
+    id: u64,
+    save: bool,
+    reply: FileDialogReply,
+}
+
+fn receive_dialog(exchange: &mut Exchange, data: &JsValue) {
+    let id = text(data, "requestId").and_then(|id| id.parse::<u64>().ok());
+    let Some(pending) = exchange.dialog.as_ref().filter(|pending| Some(pending.id) == id) else { return };
+    let result = match text(data, "outcome").as_deref() {
+        Some("cancelled") => None,
+        Some("opened") if !pending.save => None,
+        Some("destination") if pending.save => {
+            let Some(path) = text(data, "path").filter(|path| !path.is_empty() && path.len() <= 2048) else { return };
+            Some(FileDialogAnswer::SaveTo(path))
+        }
+        Some("failed") => Some(FileDialogAnswer::Unavailable(
+            text(data, "message").filter(|why| !why.is_empty() && why.len() <= 1024).unwrap_or_else(|| "The account dialog failed".into()),
+        )),
+        _ => return,
+    };
+    if let Some(pending) = exchange.dialog.take() {
+        pending.reply.send(result);
+    }
 }
 
 pub struct AccountHost {
@@ -134,6 +162,10 @@ impl AccountHost {
                     return;
                 }
                 Some("photocraft:account-save-result") => {}
+                Some("photocraft:account-dialog-result") => {
+                    receive_dialog(&mut inbox, &data);
+                    return;
+                }
                 _ => return,
             }
             let Some(request) = inbox.pending.as_ref() else { return };
@@ -186,6 +218,15 @@ impl AccountHost {
         self.parent.send(&packet("photocraft:account-ready")?, &Array::new())
     }
 
+    pub fn dialog(&self) -> AccountDialogFn {
+        let exchange = self.exchange.clone();
+        let parent = self.parent.clone();
+        Box::new(move |request, reply| match send_dialog(&exchange, &parent, request) {
+            Ok((id, save)) => exchange.borrow_mut().dialog = Some(PendingDialog { id, save, reply }),
+            Err(error) => reply.send(Some(FileDialogAnswer::Unavailable(error))),
+        })
+    }
+
     pub fn apply_start(&self, app: &mut PhotocraftApp) -> Result<(), String> {
         let Some(start) = self.exchange.borrow_mut().start.take() else { return Ok(()) };
         let mut path = None;
@@ -227,6 +268,31 @@ impl AccountHost {
         }
         self.parent.send(&message, &Array::new())
     }
+}
+
+fn send_dialog(exchange: &RefCell<Exchange>, parent: &Parent, request: AccountDialogRequest) -> Result<(u64, bool), String> {
+    let mut exchange = exchange.try_borrow_mut().map_err(|_| "Account dialog transport is busy")?;
+    if !exchange.started || exchange.dialog.is_some() {
+        return Err("The account dialog is unavailable".into());
+    }
+    let id = exchange.last_dialog.checked_add(1).ok_or("Account dialog request limit reached")?;
+    let message = packet("photocraft:account-dialog")?;
+    put(&message, "requestId", id.to_string())?;
+    let save = match request {
+        AccountDialogRequest::Open { path } => {
+            put(&message, "operation", "open")?;
+            put(&message, "path", path.map_or(JsValue::NULL, JsValue::from))?;
+            false
+        }
+        AccountDialogRequest::Save { suggested } => {
+            put(&message, "operation", "save")?;
+            put(&message, "suggested", suggested)?;
+            true
+        }
+    };
+    parent.send(&message, &Array::new())?;
+    exchange.last_dialog = id;
+    Ok((id, save))
 }
 
 pub fn profile_key(base: &str, profile: Option<&str>) -> String {

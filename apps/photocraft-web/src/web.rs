@@ -129,6 +129,7 @@ pub fn start() {
                     let host = if let Some(parent) = parent {
                         let (host, writer) = AccountHost::install(parent, &cc.egui_ctx)?;
                         services.account_save = Some(writer);
+                        services.account_dialog = Some(host.dialog());
                         services.write_unconfirmed = false;
                         host.ready()?;
                         Some(host)

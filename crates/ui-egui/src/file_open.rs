@@ -257,8 +257,10 @@ impl PhotocraftApp {
     }
 
     /// Read and open the file at `path` (see [`open_file`](Self::open_file)).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, path: &str) -> Result<Vec<String>, String> {
+        if self.services.account_dialog.is_some() {
+            return self.open_account_project(Some(path)).map(|_| Vec::new());
+        }
         self.open_path_placed(path, None, None)
     }
 
@@ -285,11 +287,6 @@ impl PhotocraftApp {
         }
         let bytes = photocraft_format::read_file(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
         self.open_file_placed(path, &bytes, slot, order)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn open_path(&mut self, path: &str) -> Result<Vec<String>, String> {
-        Err(format!("cannot open paths on the web: {path}"))
     }
 
     /// The web has no filesystem paths: a drop read by the shell arrives as bytes.

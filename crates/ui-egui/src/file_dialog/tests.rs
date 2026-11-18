@@ -26,6 +26,53 @@ fn app() -> (PhotocraftApp, Open, Rc<RefCell<Vec<String>>>) {
 }
 
 #[test]
+fn account_project_commands_use_the_host_dialog_and_leave_local_exports_alone() {
+    let (mut app, local, written) = app();
+    let dialogs = Rc::new(RefCell::new(Vec::new()));
+    let capture = dialogs.clone();
+    let saved = Rc::new(RefCell::new(Vec::new()));
+    let receipts = saved.clone();
+    app.services.account_dialog = Some(Box::new(move |request, reply| capture.borrow_mut().push((request, reply))));
+    app.services.account_save = Some(Box::new(move |request, _| {
+        receipts.borrow_mut().push(request.path.clone());
+        Ok(())
+    }));
+    let ctx = egui::Context::default();
+    menus::invoke(&mut app, &ctx, "file.open", json!({})).unwrap();
+    app.poll_file_dialog(&ctx, None);
+    let (open, reply) = dialogs.borrow_mut().pop().unwrap();
+    assert!(matches!(open, AccountDialogRequest::Open { path: None }));
+    assert!(local.borrow().is_empty());
+    reply.send(None);
+    app.poll_file_dialog(&ctx, None);
+
+    app.push_recent("Pictures/Existing.pcraft");
+    menus::invoke(&mut app, &ctx, "file.openRecent.0", json!({})).unwrap();
+    app.poll_file_dialog(&ctx, None);
+    let (recent, reply) = dialogs.borrow_mut().pop().unwrap();
+    assert!(matches!(recent, AccountDialogRequest::Open { path: Some(path) } if path == "Pictures/Existing.pcraft"));
+    reply.send(None);
+    app.poll_file_dialog(&ctx, None);
+    assert_eq!(app.session.documents().len(), 1);
+
+    menus::invoke(&mut app, &ctx, "file.saveAs", json!({})).unwrap();
+    app.poll_file_dialog(&ctx, None);
+    let (save, reply) = dialogs.borrow_mut().pop().unwrap();
+    assert!(matches!(save, AccountDialogRequest::Save { suggested } if suggested.ends_with(".pcraft")));
+    assert!(saved.borrow().is_empty());
+    reply.send(Some(FileDialogAnswer::SaveTo("Pictures/Created.pcraft".into())));
+    app.poll_file_dialog(&ctx, None);
+    assert_eq!(*saved.borrow(), ["Pictures/Created.pcraft"]);
+    assert_eq!(app.session.active().unwrap().path, None);
+    assert!(written.borrow().is_empty());
+
+    app.pick_export("Preview.png", |_, _| Ok(Value::Null)).unwrap();
+    app.poll_file_dialog(&ctx, None);
+    assert!(matches!(local.borrow().as_slice(), [(FileDialogRequest::Save { suggested }, _)] if suggested == "Preview.png"));
+    assert!(dialogs.borrow().is_empty());
+}
+
+#[test]
 fn pdn_save_requests_a_native_copy_without_overwriting_the_source() {
     let (mut app, open, written) = app();
     let st = app.session.active_mut().unwrap();
