@@ -150,7 +150,9 @@ pub fn start() {
                         app.set_wgpu(rs);
                     }
                     let unsaved = Arc::new(AtomicBool::new(false));
-                    guard_unload(unsaved.clone());
+                    if host.is_none() {
+                        guard_unload(unsaved.clone());
+                    }
                     Ok(Box::new(WebShell { app, inbox, place_inbox, drop_reads: Rc::default(), unsaved, served, database, presets, ui_language: "", host }))
                 }),
             )
@@ -497,15 +499,12 @@ impl eframe::App for WebShell {
                 log::warn!("PhotoCraft could not report the account session pause: {error}");
             }
             if host.session_suspended() {
-                if host.session_finalized() {
-                    self.unsaved.store(false, Ordering::Relaxed);
-                }
                 return;
             }
             if let Err(error) = host.apply_start(&mut self.app) {
                 log::warn!("PhotoCraft could not report account startup: {error}");
             }
-            if let Err(error) = host.apply_save_result(&mut self.app, ctx) {
+            if let Err(error) = host.apply_save_result(&mut self.app, ctx, pending()) {
                 log::warn!("PhotoCraft could not report its account save result: {error}");
             }
         }
@@ -602,7 +601,10 @@ impl eframe::App for WebShell {
         self.app.finish_type_reset_pass(ui.ctx());
         if !self.closing(ui.ctx())
             && let Some(host) = self.host.as_ref()
-            && let Err(error) = host.publish_project_state(&self.app)
+            && let Err(error) = host.publish_project_state(
+                &self.app,
+                browser_work_pending(ui.ctx(), &self.drop_reads, &self.inbox, &self.place_inbox, &self.presets),
+            )
         {
             log::warn!("PhotoCraft could not report its account project state: {error}");
         }

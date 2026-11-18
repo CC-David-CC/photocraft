@@ -84,6 +84,13 @@ fn project_fields(object: &Object, state: Option<AccountProjectState>) -> Result
     Ok(())
 }
 
+fn browser_project_state(app: &PhotocraftApp, browser_work_pending: bool) -> Option<AccountProjectState> {
+    let mut state = app.account_project_state()?;
+    state.operation_pending |= browser_work_pending;
+    state.autosave_eligible &= !browser_work_pending;
+    Some(state)
+}
+
 struct StartRequest {
     id: String,
     project: Option<(Option<String>, ArrayBuffer)>,
@@ -444,10 +451,6 @@ impl AccountHost {
         exchange.session_lease.is_some() || exchange.session_finalized
     }
 
-    pub fn session_finalized(&self) -> bool {
-        self.exchange.borrow().session_finalized
-    }
-
     /// Pause the native app at the exact reviewed revision before Accounts is
     /// revoked. The same lease must release or finalize the immutable view.
     pub fn apply_session(&self, app: &PhotocraftApp, browser_work_pending: impl Fn() -> bool) -> Result<(), String> {
@@ -539,12 +542,12 @@ impl AccountHost {
         self.parent.send(&message, &transfer)
     }
 
-    pub fn publish_project_state(&self, app: &PhotocraftApp) -> Result<(), String> {
+    pub fn publish_project_state(&self, app: &PhotocraftApp, browser_work_pending: bool) -> Result<(), String> {
         let mut exchange = self.exchange.borrow_mut();
         if !exchange.started || exchange.close_approved {
             return Ok(());
         }
-        let state = app.account_project_state();
+        let state = browser_project_state(app, browser_work_pending);
         if state == exchange.project_state {
             return Ok(());
         }
@@ -584,7 +587,7 @@ impl AccountHost {
         self.parent.send(&message, &Array::new())
     }
 
-    pub fn apply_save_result(&self, app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    pub fn apply_save_result(&self, app: &mut PhotocraftApp, ctx: &egui::Context, browser_work_pending: bool) -> Result<(), String> {
         let Some((request, result)) = ({
             let mut exchange = self.exchange.borrow_mut();
             if std::mem::take(&mut exchange.save_uncertain) {
@@ -599,7 +602,7 @@ impl AccountHost {
         fields(&message, &request)?;
         put(&message, "adopted", adopted.is_ok())?;
         let state = Object::new();
-        project_fields(&state, app.account_project_state())?;
+        project_fields(&state, browser_project_state(app, browser_work_pending))?;
         put(&message, "projectState", state)?;
         if let Err(error) = adopted {
             put(&message, "message", error)?;
