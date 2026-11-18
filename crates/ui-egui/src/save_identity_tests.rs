@@ -191,6 +191,25 @@ fn account_autosave_captures_only_the_exact_named_edit_without_a_dialog_or_actio
 }
 
 #[test]
+fn account_session_pause_checks_the_reviewed_revision_and_pending_native_work() {
+    let mut source = app();
+    source.services.account_save = Some(Box::new(|_, _| Ok(())));
+    let current = source.account_project_state().unwrap();
+    let check = |app: &PhotocraftApp, state:crate::AccountProjectState| {
+        app.check_account_pause(state.document, state.revision, state.dirty, state.unfinished_edit)
+    };
+    assert!(check(&source,current).is_ok(), "the exact reviewed dirty revision can be held");
+    assert!(check(&source,crate::AccountProjectState {dirty:false,..current}).is_err());
+    source.run("layer.new.layer", json!({})).unwrap();
+    assert!(check(&source,current).is_err(), "a later edit invalidates the review");
+    let path = "Pictures/Layered.pcraft";
+    source.session.active_mut().unwrap().path = Some(path.into());
+    let current = source.account_project_state().unwrap();
+    assert!(source.begin_account_autosave(current.document,current.revision,path).unwrap());
+    assert!(check(&source,current).is_err(), "a pending save cannot be frozen");
+}
+
+#[test]
 fn account_save_captures_real_layered_bytes_and_adopts_only_the_confirmed_revision() {
     let mut app = app();
     let out = Rc::new(RefCell::new(None));

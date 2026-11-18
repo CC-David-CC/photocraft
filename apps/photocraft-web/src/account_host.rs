@@ -1,6 +1,6 @@
 //! Account project exchange for PhotoCraft embedded by the same-origin desktop.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
 use photocraft_doc::DocId;
@@ -128,6 +128,41 @@ struct Exchange {
     project_state: Option<AccountProjectState>,
     autosave: Option<AutosaveRequest>,
     dispatching_autosave: Option<String>,
+    session_commands: VecDeque<SessionRequest>,
+    session_lease: Option<String>,
+    session_finalized: bool,
+}
+
+struct SessionRequest {
+    request_id: String,
+    lease: String,
+    operation: SessionOperation,
+}
+
+#[derive(Clone, Copy)]
+enum SessionOperation {
+    Pause { document: DocId, revision: u64, dirty: bool, unfinished_edit: bool },
+    Release,
+    Finalize,
+}
+
+impl SessionRequest {
+    fn read(data: &JsValue) -> Option<Self> {
+        let request_id = request_id(data)?;
+        let lease = text(data, "lease").filter(|id| id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))?;
+        let operation = match text(data, "operation").as_deref() {
+            Some("pause") => SessionOperation::Pause {
+                document: DocId(text(data, "documentId")?.parse().ok()?),
+                revision: text(data, "revision")?.parse().ok()?,
+                dirty: field(data, "dirty")?.as_bool()?,
+                unfinished_edit: field(data, "unfinishedEdit")?.as_bool()?,
+            },
+            Some("release") => SessionOperation::Release,
+            Some("finalize") => SessionOperation::Finalize,
+            _ => return None,
+        };
+        Some(Self {request_id, lease, operation})
+    }
 }
 
 struct AutosaveRequest {
@@ -208,7 +243,20 @@ impl AccountHost {
                 return;
             }
             let Ok(mut inbox) = inbox.try_borrow_mut() else { return };
-            match text(&data, "type").as_deref() {
+            let kind = text(&data, "type");
+            if kind.as_deref() == Some("photocraft:account-session") {
+                if inbox.started && inbox.session_commands.len() < 8
+                    && let Some(command) = SessionRequest::read(&data)
+                {
+                    inbox.session_commands.push_back(command);
+                    wake.request_repaint();
+                }
+                return;
+            }
+            if inbox.session_lease.is_some() || inbox.session_finalized {
+                return;
+            }
+            match kind.as_deref() {
                 Some("photocraft:account-start") => {
                     if !inbox.started && inbox.start.is_none() {
                         inbox.start = StartRequest::read(&data);
@@ -367,6 +415,58 @@ impl AccountHost {
         Ok(exchange.close_approved)
     }
 
+    pub fn session_suspended(&self) -> bool {
+        let exchange = self.exchange.borrow();
+        exchange.session_lease.is_some() || exchange.session_finalized
+    }
+
+    pub fn session_finalized(&self) -> bool {
+        self.exchange.borrow().session_finalized
+    }
+
+    /// Pause the native app at the exact reviewed revision before Accounts is
+    /// revoked. The same lease must release or finalize the immutable view.
+    pub fn apply_session(&self, app: &PhotocraftApp, browser_work_pending: impl Fn() -> bool) -> Result<(), String> {
+        let mut exchange = self.exchange.borrow_mut();
+        while let Some(request) = exchange.session_commands.pop_front() {
+            let token_matches = exchange.session_lease.as_deref() == Some(request.lease.as_str());
+            let (operation, result) = match request.operation {
+                SessionOperation::Pause {document, revision, dirty, unfinished_edit} => {
+                    let ready = !exchange.close_approved && exchange.close.is_none() && !exchange.session_finalized
+                        && exchange.session_lease.is_none() && exchange.autosave.is_none()
+                        && !browser_work_pending();
+                    ("pause", if ready {
+                        app.check_account_pause(document, revision, dirty, unfinished_edit)
+                    } else {
+                        Err("Finish the pending PhotoCraft operation before ending the session.".into())
+                    })
+                }
+                SessionOperation::Release => ("release", token_matches.then_some(()).ok_or_else(|| "PhotoCraft session pause has changed.".into())),
+                SessionOperation::Finalize => ("finalize", token_matches.then_some(()).ok_or_else(|| "PhotoCraft session pause has changed.".into())),
+            };
+            let message = packet("photocraft:account-session-result")?;
+            put(&message, "requestId", request.request_id)?;
+            put(&message, "lease", request.lease.as_str())?;
+            put(&message, "operation", operation)?;
+            put(&message, "ok", result.is_ok())?;
+            if let Err(detail) = &result {
+                put(&message, "message", detail.as_str())?;
+            }
+            self.parent.send(&message, &Array::new())?;
+            if result.is_ok() {
+                match request.operation {
+                    SessionOperation::Pause {..} => exchange.session_lease = Some(request.lease),
+                    SessionOperation::Release => exchange.session_lease = None,
+                    SessionOperation::Finalize => {
+                        exchange.session_lease = None;
+                        exchange.session_finalized = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn apply_start(&self, app: &mut PhotocraftApp) -> Result<(), String> {
         let Some(start) = self.exchange.borrow_mut().start.take() else { return Ok(()) };
         let mut path = None;
@@ -432,6 +532,8 @@ impl AccountHost {
             put(&message, "dirty", state.dirty)?;
             put(&message, "capturable", state.capturable)?;
             put(&message, "autosaveEligible", state.autosave_eligible)?;
+            put(&message, "operationPending", state.operation_pending)?;
+            put(&message, "unfinishedEdit", state.unfinished_edit)?;
         }
         self.parent.send(&message, &Array::new())?;
         exchange.project_state = state;

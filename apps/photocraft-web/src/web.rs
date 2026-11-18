@@ -395,12 +395,8 @@ struct WebShell {
 impl WebShell {
     fn closing(&mut self, ctx: &egui::Context) -> bool {
         let Some(host) = self.host.as_ref() else { return false };
-        let browser_work_pending = || self.drop_reads.get() != 0
-            || ctx.input(|i| !i.raw.dropped_files.is_empty())
-            || !self.inbox.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
-            || !self.place_inbox.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
-            || self.presets.unsaved();
-        match host.apply_close(&mut self.app, browser_work_pending) {
+        let pending = || browser_work_pending(ctx, &self.drop_reads, &self.inbox, &self.place_inbox, &self.presets);
+        match host.apply_close(&mut self.app, pending) {
             Ok(closing) => closing,
             Err(error) => {
                 log::warn!("PhotoCraft could not report its account close result: {error}");
@@ -466,12 +462,25 @@ impl WebShell {
     }
 }
 
+fn browser_work_pending(ctx: &egui::Context, reads: &Cell<usize>, open: &Inbox, place: &PlaceInbox, presets: &crate::preset_bridge::Bridge) -> bool {
+    reads.get() != 0 || ctx.input(|i| !i.raw.dropped_files.is_empty())
+        || !open.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+        || !place.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+        || presets.unsaved()
+}
+
 impl eframe::App for WebShell {
     fn persist_egui_memory(&self) -> bool {
         self.host.is_none()
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.host.as_ref().is_some_and(AccountHost::session_suspended) {
+            raw_input.events.clear();
+            raw_input.dropped_files.clear();
+            raw_input.hovered_files.clear();
+            return;
+        }
         // A tap reaches eframe as Pointer Events and Touch Events: keep one press per tap, or the
         // twin press closes the menu the first one opened (#2095).
         photocraft_ui_egui::touch_twins::drop_twins(ctx, raw_input);
@@ -483,6 +492,16 @@ impl eframe::App for WebShell {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if let Some(host) = self.host.as_ref() {
+            let pending = || browser_work_pending(ctx, &self.drop_reads, &self.inbox, &self.place_inbox, &self.presets);
+            if let Err(error) = host.apply_session(&self.app, pending) {
+                log::warn!("PhotoCraft could not report the account session pause: {error}");
+            }
+            if host.session_suspended() {
+                if host.session_finalized() {
+                    self.unsaved.store(false, Ordering::Relaxed);
+                }
+                return;
+            }
             if let Err(error) = host.apply_start(&mut self.app) {
                 log::warn!("PhotoCraft could not report account startup: {error}");
             }
@@ -552,7 +571,7 @@ impl eframe::App for WebShell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if self.closing(ui.ctx()) {
+        if self.host.as_ref().is_some_and(AccountHost::session_suspended) || self.closing(ui.ctx()) {
             return;
         }
         // Only while a preset change is unsaved. Storage the browser denies from the start (a

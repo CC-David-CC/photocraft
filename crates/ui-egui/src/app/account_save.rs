@@ -17,6 +17,8 @@ pub struct AccountProjectState {
     pub dirty: bool,
     pub capturable: bool,
     pub autosave_eligible: bool,
+    pub operation_pending: bool,
+    pub unfinished_edit: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -136,6 +138,8 @@ impl PhotocraftApp {
         }
         let st = self.session.active()?;
         let other_edit = self.account_edit_in_progress(false);
+        let operation_pending = self.saving() || !self.session.jobs().is_empty() || self.file_dialog_open() || self.discard.is_some();
+        let unfinished_edit = other_edit || self.ui.text_edit.is_some();
         let type_can_recover = self.ui.text_edit.as_ref().is_none_or(|edit|
             edit.preedit.is_none() && !edit.dragging && edit.resize.is_none()
                 && edit.document.is_none_or(|doc| doc == st.doc.id.0)
@@ -143,8 +147,21 @@ impl PhotocraftApp {
                 && st.history.can_undo());
         Some(AccountProjectState { document: st.doc.id, revision: st.revision, dirty: st.is_dirty(),
             capturable: type_can_recover && !other_edit,
-            autosave_eligible: st.path.is_some() && !other_edit && self.ui.text_edit.is_none()
-                && !self.saving() && self.session.jobs().is_empty() && !self.file_dialog_open() && self.discard.is_none() })
+            autosave_eligible: st.path.is_some() && !unfinished_edit && !operation_pending,
+            operation_pending, unfinished_edit })
+    }
+
+    /// A session pause can cover dirty work only after the host has reviewed
+    /// this exact native state. It never commits an unfinished tool transaction.
+    pub fn check_account_pause(&self, document: DocId, revision: u64, dirty: bool, unfinished_edit: bool) -> Result<(), String> {
+        let state = self.account_project_state().ok_or("PhotoCraft has no single account document to pause.")?;
+        if state.document != document || state.revision != revision || state.dirty != dirty || state.unfinished_edit != unfinished_edit {
+            return Err("PhotoCraft changed after you reviewed it.".into());
+        }
+        if state.operation_pending {
+            return Err("Finish the pending PhotoCraft operation before ending the session.".into());
+        }
+        Ok(())
     }
 
     /// Capture only the named revision authorized by the host. Use the same
