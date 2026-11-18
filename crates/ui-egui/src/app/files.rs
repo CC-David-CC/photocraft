@@ -212,6 +212,7 @@ impl PhotocraftApp {
     /// (a flat file): confirming the document's own file is recorded as a `file.save` step,
     /// which writes whichever file the action is played on, not as a Save As to a fixed path.
     pub(crate) fn save_dialog_flow(&mut self, path: Option<String>, choices: FormatChoices, plain_save: bool) -> Result<Value, String> {
+        self.check_account_save_composition()?;
         if self.smart_svg.modal_open() {
             return Err("Answer Edit SVG Contents before starting a save".into());
         }
@@ -593,6 +594,7 @@ impl PhotocraftApp {
     pub(crate) fn write_document(&mut self, path: String, settings: &ExportSettings, copy: bool) -> Result<Option<(String, Vec<String>)>, String> {
         let account_write = self.services.account_save.is_some() && !copy;
         if account_write {
+            self.check_account_save_composition()?;
             if self.account_save.request().is_some() {
                 return Err("An account save is awaiting a result".into());
             }
@@ -619,6 +621,13 @@ impl PhotocraftApp {
         let revision = saved_revision_after_write(!self.services.write_unconfirmed, written, previous);
         self.saved(doc, revision, &path, &warnings, copy);
         Ok(Some((path, warnings)))
+    }
+
+    fn check_account_save_composition(&self) -> Result<(), String> {
+        if self.services.account_save.is_some() && self.ui.text_edit.as_ref().is_some_and(|edit| edit.preedit.is_some()) {
+            return Err(tl!("Finish or cancel the text composition before saving.").into());
+        }
+        Ok(())
     }
 
     /// After `saver` was written to `path`, any other open document bound to that file no longer

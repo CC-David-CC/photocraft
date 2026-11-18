@@ -211,6 +211,28 @@ fn account_recovery_preserves_the_previous_snapshot_during_a_live_type_edit() {
 }
 
 #[test]
+fn account_save_leaves_active_text_composition_in_the_editor() {
+    let mut source = app();
+    source.services.account_save = Some(Box::new(|_, _| panic!("active composition must not be written")));
+    source.run("type.create", json!({"text":"Before","x":1,"y":2})).unwrap();
+    crate::type_tool::edit_active(&mut source).unwrap();
+    source.ui.text_edit.as_mut().unwrap().preedit = Some((0, 1));
+    let path = "Pictures/Layered.pcraft";
+    let context = egui::Context::default();
+    let before = identity(&source);
+    for (command, params) in [("file.saveAs", json!({})), ("file.save", json!({"path":path}))] {
+        let error = menus::invoke(&mut source, &context, command, params).unwrap_err();
+        assert!(error.contains("text composition"));
+    }
+    let settings = source.save_settings();
+    let error = source.write_document(path.into(), &settings, false).unwrap_err();
+    assert!(error.contains("text composition"));
+    assert_eq!(identity(&source), before);
+    assert!(!source.file_dialog_open());
+    assert_eq!(source.ui.text_edit.as_ref().unwrap().preedit, Some((0, 1)));
+}
+
+#[test]
 fn account_recovery_restores_pending_type_and_its_native_cancel_baseline() {
     let mut source = app();
     source.services.account_save = Some(Box::new(|_, _| Ok(())));
