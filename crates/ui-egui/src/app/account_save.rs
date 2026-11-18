@@ -16,6 +16,7 @@ pub struct AccountProjectState {
     pub revision: u64,
     pub dirty: bool,
     pub capturable: bool,
+    pub autosave_eligible: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -134,13 +135,32 @@ impl PhotocraftApp {
             return None;
         }
         let st = self.session.active()?;
+        let other_edit = self.account_edit_in_progress(false);
         let type_can_recover = self.ui.text_edit.as_ref().is_none_or(|edit|
             edit.preedit.is_none() && !edit.dragging && edit.resize.is_none()
                 && edit.document.is_none_or(|doc| doc == st.doc.id.0)
                 && st.coalesce.as_deref() == Some(edit.session.as_str())
                 && st.history.can_undo());
         Some(AccountProjectState { document: st.doc.id, revision: st.revision, dirty: st.is_dirty(),
-            capturable: type_can_recover && !self.account_edit_in_progress(false) })
+            capturable: type_can_recover && !other_edit,
+            autosave_eligible: st.path.is_some() && !other_edit && self.ui.text_edit.is_none()
+                && !self.saving() && self.session.jobs().is_empty() && !self.file_dialog_open() && self.discard.is_none() })
+    }
+
+    /// Capture only the named revision authorized by the host. Use the same
+    /// native encoder and pending-save receipt as manual Save, without opening
+    /// a dialog, ending a tool gesture or adding a step to a recorded action.
+    pub fn begin_account_autosave(&mut self, document: DocId, revision: u64, path: &str) -> Result<bool, String> {
+        validate_path(path)?;
+        let Some(state) = self.account_project_state() else { return Ok(false) };
+        if state.document != document || state.revision != revision || !state.dirty || !state.autosave_eligible
+            || !self.session.active().is_some_and(|st| st.path.as_deref() == Some(path))
+        {
+            return Ok(false);
+        }
+        let settings = self.save_settings();
+        self.write_document(path.to_owned(), &settings, false)?;
+        Ok(true)
     }
 
     /// Start the initial account view with a native blank or a saved project.

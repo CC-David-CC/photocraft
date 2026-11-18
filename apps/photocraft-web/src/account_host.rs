@@ -126,6 +126,13 @@ struct Exchange {
     close_approved: bool,
     recovery: Option<RecoveryRequest>,
     project_state: Option<AccountProjectState>,
+    autosave: Option<AutosaveRequest>,
+    dispatching_autosave: Option<String>,
+}
+
+struct AutosaveRequest {
+    project: RecoveryRequest,
+    path: String,
 }
 
 struct RecoveryRequest {
@@ -235,6 +242,16 @@ impl AccountHost {
                     }
                     return;
                 }
+                Some("photocraft:account-autosave") => {
+                    if inbox.started && !inbox.close_approved && inbox.autosave.is_none()
+                        && let Some(project) = RecoveryRequest::read(&data)
+                        && let Some(path) = text(&data, "path").filter(|path| !path.is_empty() && path.len() <= 2048)
+                    {
+                        inbox.autosave = Some(AutosaveRequest {project, path});
+                        wake.request_repaint();
+                    }
+                    return;
+                }
                 _ => return,
             }
             let Some(request) = inbox.pending.as_ref() else { return };
@@ -276,7 +293,14 @@ impl AccountHost {
             if exchange.pending.is_some() {
                 return Err("An account save is awaiting a result".into());
             }
-            let message = packet("photocraft:account-save")?;
+            let message = if let Some(id) = &exchange.dispatching_autosave {
+                let message = packet("photocraft:account-autosave-result")?;
+                put(&message, "requestId", id.as_str())?;
+                put(&message, "outcome", "captured")?;
+                message
+            } else {
+                packet("photocraft:account-save")?
+            };
             fields(&message, request)?;
             let buffer = Uint8Array::from(bytes.as_slice()).buffer();
             put(&message, "bytes", buffer.clone())?;
@@ -407,10 +431,35 @@ impl AccountHost {
             put(&message, "revision", state.revision.to_string())?;
             put(&message, "dirty", state.dirty)?;
             put(&message, "capturable", state.capturable)?;
+            put(&message, "autosaveEligible", state.autosave_eligible)?;
         }
         self.parent.send(&message, &Array::new())?;
         exchange.project_state = state;
         Ok(())
+    }
+
+    pub fn apply_autosave(&self, app: &mut PhotocraftApp) -> Result<(), String> {
+        let Some(request) = self.exchange.borrow_mut().autosave.take() else { return Ok(()) };
+        let RecoveryRequest {id, document, revision} = request.project;
+        self.exchange.borrow_mut().dispatching_autosave = Some(id.clone());
+        let outcome = app.begin_account_autosave(document, revision, &request.path);
+        self.exchange.borrow_mut().dispatching_autosave = None;
+        if outcome == Ok(true) {
+            // The ordinary save writer already transferred bytes and the ticket.
+            return Ok(());
+        }
+        let message = packet("photocraft:account-autosave-result")?;
+        put(&message, "requestId", id)?;
+        put(&message, "documentId", document.0.to_string())?;
+        put(&message, "revision", revision.to_string())?;
+        put(&message, "path", request.path)?;
+        if let Err(error) = outcome {
+            put(&message, "outcome", "failed")?;
+            put(&message, "message", error)?;
+        } else {
+            put(&message, "outcome", "busy")?;
+        }
+        self.parent.send(&message, &Array::new())
     }
 
     pub fn apply_save_result(&self, app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {

@@ -542,6 +542,11 @@ impl eframe::App for WebShell {
         }
         self.serve_fonts(ctx);
         self.app.logic_frame(ctx, frame);
+        if let Some(host) = self.host.as_ref()
+            && let Err(error) = host.apply_autosave(&mut self.app)
+        {
+            log::warn!("PhotoCraft could not report its AutoSave request: {error}");
+        }
         self.save_presets(ctx);
         self.app.finish_type_reset_logic(ctx);
     }

@@ -153,6 +153,44 @@ fn account_recovery_restores_pending_type_and_its_native_cancel_baseline() {
 }
 
 #[test]
+fn account_autosave_captures_only_the_exact_named_edit_without_a_dialog_or_action_step() {
+    let mut source = app();
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let writes = requests.clone();
+    source.services.account_save = Some(Box::new(move |request, _| {
+        writes.borrow_mut().push(request.clone());
+        Ok(())
+    }));
+    let path = "Pictures/Layered.pcraft";
+    let state = source.account_project_state().unwrap();
+    assert!(!source.begin_account_autosave(state.document, state.revision, path).unwrap(), "an untitled document needs an explicit Save");
+    source.session.active_mut().unwrap().path = Some(path.into());
+    let layer = source.run("type.create", json!({"text":"Before","x":1,"y":2})).unwrap()["layer"].as_u64().unwrap();
+    crate::type_tool::edit_active(&mut source).unwrap();
+    let key = source.ui.text_edit.as_ref().unwrap().session.clone();
+    source.run("type.edit", json!({"layer":layer,"text":"Pending","coalesce":key})).unwrap();
+    let typing = source.account_project_state().unwrap();
+    assert!(typing.capturable && !typing.autosave_eligible);
+    assert!(!source.begin_account_autosave(typing.document, typing.revision, path).unwrap());
+    assert!(source.ui.text_edit.is_some());
+    crate::type_tool::commit(&mut source);
+    let current = source.account_project_state().unwrap();
+    let journal = source.session.journal.len();
+    assert!(!source.begin_account_autosave(current.document, current.revision - 1, path).unwrap());
+    assert!(!source.begin_account_autosave(current.document, current.revision, "Pictures/Other.pcraft").unwrap());
+    assert!(source.begin_account_autosave(current.document, current.revision, path).unwrap());
+    assert!(!source.file_dialog_open());
+    assert_eq!(source.session.journal.len(), journal);
+    let request = requests.borrow().first().unwrap().clone();
+    assert_eq!((request.document, request.revision, request.path.as_str()), (current.document, current.revision, path));
+    assert!(source.session.active().unwrap().is_dirty());
+    assert!(!source.begin_account_autosave(current.document, current.revision, path).unwrap());
+    assert_eq!(requests.borrow().len(), 1);
+    source.finish_account_save(&request, Ok(()), &egui::Context::default()).unwrap();
+    assert!(!source.session.active().unwrap().is_dirty());
+}
+
+#[test]
 fn account_save_captures_real_layered_bytes_and_adopts_only_the_confirmed_revision() {
     let mut app = app();
     let out = Rc::new(RefCell::new(None));
