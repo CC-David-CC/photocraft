@@ -51,7 +51,8 @@ pub use video_cmds::render_video_with;
 use std::sync::Arc;
 
 use photocraft_doc::{Document, LayerId};
-use photocraft_ops::{History, LayerTarget};
+use photocraft_ops::History;
+pub use photocraft_ops::LayerTarget;
 use serde_json::Value;
 
 pub use commands::{CommandSpec, command_specs};

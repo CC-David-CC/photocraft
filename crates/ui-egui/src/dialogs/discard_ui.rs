@@ -144,7 +144,7 @@ impl PhotocraftApp {
         if self.saving() || !self.session.jobs().is_empty() || self.file_dialog_open() || self.discard.is_some() {
             return Err("Finish the active PhotoCraft operation before closing.".into());
         }
-        if self.account_edit_in_progress() {
+        if self.account_edit_in_progress(true) {
             return Err("Finish or cancel the current PhotoCraft edit before closing.".into());
         }
         self.account_save.close_approved = false;
@@ -157,10 +157,10 @@ impl PhotocraftApp {
         Ok(())
     }
 
-    pub(crate) fn account_edit_in_progress(&self) -> bool {
+    pub(crate) fn account_edit_in_progress(&self, include_type: bool) -> bool {
         self.drag.is_some()
             || self.live_stroke.is_some()
-            || self.ui.text_edit.is_some()
+            || include_type && self.ui.text_edit.is_some()
             || self.type_box_preview.is_some()
             || self.type_transform_preview.is_some()
             || self.session.documents().iter().any(|state| state.floating.is_some())
@@ -199,7 +199,7 @@ impl PhotocraftApp {
     /// confirmed. The web build has the browser ask before leaving the page while this holds (#1380).
     pub fn has_unsaved_work(&self) -> bool {
         !self.allow_close
-            && (self.session.documents().iter().any(|d| d.is_dirty()) || self.services.account_save.is_some() && self.account_edit_in_progress())
+            && (self.session.documents().iter().any(|d| d.is_dirty()) || self.services.account_save.is_some() && self.account_edit_in_progress(true))
     }
 }
 

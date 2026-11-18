@@ -76,7 +76,7 @@ pub use file_open::OsEvent;
 pub use state::{Tool, UiState};
 
 mod app;
-pub use app::account_save::{AccountSaveFn, AccountSaveRequest};
+pub use app::account_save::{AccountProjectState, AccountSaveFn, AccountSaveRequest};
 mod input;
 mod prefs;
 mod services;

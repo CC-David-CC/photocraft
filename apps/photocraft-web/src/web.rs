@@ -576,7 +576,12 @@ impl eframe::App for WebShell {
         self.app.ui_frame(ui, frame);
         self.save_presets(ui.ctx());
         self.app.finish_type_reset_pass(ui.ctx());
-        self.closing(ui.ctx());
+        if !self.closing(ui.ctx())
+            && let Some(host) = self.host.as_ref()
+            && let Err(error) = host.publish_project_state(&self.app)
+        {
+            log::warn!("PhotoCraft could not report its account project state: {error}");
+        }
     }
 }
 

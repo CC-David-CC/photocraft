@@ -120,6 +120,39 @@ fn account_recovery_preserves_the_previous_snapshot_during_a_live_type_edit() {
 }
 
 #[test]
+fn account_recovery_restores_pending_type_and_its_native_cancel_baseline() {
+    let mut source = app();
+    source.services.account_save = Some(Box::new(|_, _| Ok(())));
+    let layer = source.run("type.create", json!({"text":"Before","x":1,"y":2})).unwrap()["layer"].as_u64().unwrap();
+    crate::type_tool::edit_active(&mut source).unwrap();
+    let key = source.ui.text_edit.as_ref().unwrap().session.clone();
+    source.run("type.edit", json!({"layer":layer,"text":"Pending","coalesce":key})).unwrap();
+    let state = source.account_project_state().unwrap();
+    assert!(state.dirty && state.capturable);
+    let bytes = source.capture_account_recovery(state.document, state.revision).unwrap();
+    assert_eq!(source.account_project_state(), Some(state));
+    assert!(source.ui.text_edit.is_some());
+
+    let mut restored = PhotocraftApp::new(Session::new(), Services {
+        account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default()
+    });
+    restored.start_account_recovery(None, &bytes).unwrap();
+    assert_eq!(restored.ui.text_edit.as_ref().unwrap().layer, layer);
+    let text = |app: &PhotocraftApp| {
+        let doc = &app.session.active().unwrap().doc;
+        let photocraft_doc::LayerContent::Text(text) = &doc.layer(photocraft_doc::LayerId(layer)).unwrap().content else {
+            panic!("Expected editable text layer");
+        };
+        text.text.clone()
+    };
+    assert_eq!(text(&restored), "Pending");
+    crate::type_tool::cancel(&mut restored);
+    assert_eq!(text(&restored), "Before");
+    assert!(restored.ui.text_edit.is_none());
+    assert_eq!(text(&source), "Pending");
+}
+
+#[test]
 fn account_save_captures_real_layered_bytes_and_adopts_only_the_confirmed_revision() {
     let mut app = app();
     let out = Rc::new(RefCell::new(None));

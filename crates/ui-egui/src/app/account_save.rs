@@ -1,8 +1,88 @@
 //! Account writes settle separately from encoding and transport dispatch.
 
-use photocraft_doc::DocId;
+use photocraft_doc::{DocId, Document, LayerContent, LayerId, TextLayer};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::{PhotocraftApp, dialogs::discard_ui};
+
+const TYPE_DRAFT: &[u8] = b"PCDRAFT1";
+const TYPE_DRAFT_HEADER: usize = 16;
+
+/// Exact native state observed by the browser journal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccountProjectState {
+    pub document: DocId,
+    pub revision: u64,
+    pub dirty: bool,
+    pub capturable: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TypeDraft {
+    layer: u64,
+    anchor: usize,
+    caret: usize,
+    created: bool,
+    mask: bool,
+}
+
+impl TypeDraft {
+    fn text<'a>(&self, doc: &'a Document) -> Result<&'a TextLayer, String> {
+        let layer = doc.layer(LayerId(self.layer)).ok_or("The recovered text layer is missing")?;
+        let LayerContent::Text(text) = &layer.content else { return Err("The recovered layer is not editable text".into()) };
+        let count = text.text.chars().count();
+        if self.anchor > count || self.caret > count {
+            return Err("The recovered text selection is invalid".into());
+        }
+        Ok(text)
+    }
+}
+
+fn encode_type_draft(bytes: Vec<u8>, before: &Document, draft: &TypeDraft) -> Result<Vec<u8>, String> {
+    let details = serde_json::to_vec(draft).map_err(|error| error.to_string())?;
+    let before = photocraft_format::save_to_bytes(before, &Default::default()).map_err(|error| error.to_string())?;
+    let details_len = u32::try_from(details.len()).map_err(|error| error.to_string())?;
+    let before_len = u32::try_from(before.len()).map_err(|error| error.to_string())?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(TYPE_DRAFT_HEADER.saturating_add(details.len()).saturating_add(before.len()).saturating_add(bytes.len()))
+        .map_err(|error| error.to_string())?;
+    out.extend_from_slice(TYPE_DRAFT);
+    out.extend_from_slice(&details_len.to_le_bytes());
+    out.extend_from_slice(&before_len.to_le_bytes());
+    out.extend(details);
+    out.extend(before);
+    out.extend(bytes);
+    Ok(out)
+}
+
+fn decode_recovery(bytes: &[u8]) -> Result<(Document, Option<(Document, TypeDraft)>), String> {
+    let load = |part| photocraft_format::load_from_bytes(part).map_err(|error| error.to_string());
+    if !bytes.starts_with(TYPE_DRAFT) {
+        return Ok((load(bytes)?, None));
+    }
+    let invalid = || "Invalid PhotoCraft Type recovery snapshot".to_owned();
+    let u32_at = |offset: usize| {
+        let word = bytes.get(offset..offset + 4).ok_or_else(invalid)?;
+        Ok::<usize, String>(u32::from_le_bytes(word.try_into().map_err(|_| invalid())?) as usize)
+    };
+    let details_len = u32_at(8)?;
+    let before_len = u32_at(12)?;
+    if !(1..=1024).contains(&details_len) || before_len == 0 {
+        return Err(invalid());
+    }
+    let before_at = TYPE_DRAFT_HEADER + details_len;
+    let project_at = before_at.checked_add(before_len).ok_or_else(invalid)?;
+    let draft: TypeDraft = serde_json::from_slice(bytes.get(TYPE_DRAFT_HEADER..before_at).ok_or_else(invalid)?)
+        .map_err(|error| error.to_string())?;
+    let committed = load(bytes.get(before_at..project_at).ok_or_else(invalid)?)?;
+    let working = load(bytes.get(project_at..).ok_or_else(invalid)?)?;
+    if committed.id != working.id || committed.layer(LayerId(draft.layer)).is_some() == draft.created {
+        return Err(invalid());
+    }
+    draft.text(&working)?;
+    Ok((working, Some((committed, draft))))
+}
 
 /// The half of an account write owned by the native editor. The host binds it
 /// to its account/session and the expected Storage revision before sending bytes.
@@ -49,6 +129,20 @@ impl AccountSaveState {
 }
 
 impl PhotocraftApp {
+    pub fn account_project_state(&self) -> Option<AccountProjectState> {
+        if self.services.account_save.is_none() || self.session.documents().len() != 1 {
+            return None;
+        }
+        let st = self.session.active()?;
+        let type_can_recover = self.ui.text_edit.as_ref().is_none_or(|edit|
+            edit.preedit.is_none() && !edit.dragging && edit.resize.is_none()
+                && edit.document.is_none_or(|doc| doc == st.doc.id.0)
+                && st.coalesce.as_deref() == Some(edit.session.as_str())
+                && st.history.can_undo());
+        Some(AccountProjectState { document: st.doc.id, revision: st.revision, dirty: st.is_dirty(),
+            capturable: type_can_recover && !self.account_edit_in_progress(false) })
+    }
+
     /// Start the initial account view with a native blank or a saved project.
     /// An account path represents a Storage resource and never a local path.
     pub fn start_account_document(&mut self, project: Option<(&str, &[u8])>, new_settings: Option<serde_json::Value>) -> Result<(DocId, u64), String> {
@@ -84,15 +178,18 @@ impl PhotocraftApp {
     /// Encode a browser-local recovery snapshot without saving the editor or
     /// acknowledging any server write. The caller owns the base Storage revision.
     pub fn capture_account_recovery(&self, document: DocId, revision: u64) -> Result<Vec<u8>, String> {
-        if self.services.account_save.is_none() || self.session.documents().len() != 1 {
-            return Err("PhotoCraft recovery needs one account document".into());
-        }
-        let state = self.session.active().filter(|st| st.doc.id == document && st.revision == revision && st.is_dirty())
+        let state = self.account_project_state().filter(|st| st.document == document && st.revision == revision && st.dirty)
             .ok_or("The PhotoCraft recovery revision is no longer current")?;
-        if self.account_edit_in_progress() {
+        if !state.capturable {
             return Err("A PhotoCraft edit is still in progress".into());
         }
-        photocraft_format::save_to_bytes(&state.doc, &Default::default()).map_err(|error| error.to_string())
+        let live = self.session.active().ok_or("PhotoCraft recovery needs one account document")?;
+        let bytes = photocraft_format::save_to_bytes(&live.doc, &Default::default()).map_err(|error| error.to_string())?;
+        let Some(edit) = self.ui.text_edit.as_ref() else { return Ok(bytes) };
+        let before = live.history.clone().undo(live.doc.clone()).map(|pair| pair.0).ok_or("The Type edit baseline is unavailable")?;
+        let draft = TypeDraft {layer: edit.layer, anchor: edit.anchor, caret: edit.caret, created: edit.created, mask: edit.mask};
+        draft.text(&live.doc)?;
+        encode_type_draft(bytes, &before, &draft)
     }
 
     /// Recover a native snapshot as unsaved work. The browser supplies a path
@@ -104,7 +201,7 @@ impl PhotocraftApp {
         if let Some(path) = path {
             validate_path(path)?;
         }
-        let mut doc = photocraft_format::load_from_bytes(bytes).map_err(|error| error.to_string())?;
+        let (mut doc, pending_type) = decode_recovery(bytes)?;
         if let Some(path) = path {
             doc.name = crate::file_open::display_name(path);
         }
@@ -114,12 +211,43 @@ impl PhotocraftApp {
         state.saved_revision = 0;
         let admitted = (state.doc.id, state.revision);
         self.sync_views();
+        if let Some((before, draft)) = pending_type {
+            let text = draft.text(&self.session.active().ok_or("The recovered project closed")?.doc)?;
+            let orientation = text.orientation;
+            self.restore_account_type(before, draft, orientation)?;
+        }
         self.ui.views[index].fit_pending = true;
         let status = "Recovered PhotoCraft project from this browser";
         self.ui.status = status.into();
         self.ui.status_error = false;
         crate::notices::io_warnings(self, status, &warnings);
         Ok(admitted)
+    }
+
+    fn restore_account_type(&mut self, mut before: Document, draft: TypeDraft, orientation: photocraft_doc::text::Orientation) -> Result<(), String> {
+        let layer = LayerId(draft.layer);
+        let session = format!("type-{}", self.ui.alloc_id());
+        let st = self.session.active_mut().ok_or("The recovered project closed")?;
+        before.id = st.doc.id;
+        before.name.clone_from(&st.doc.name);
+        let previous_layer = if before.layer(layer).is_some() {Some(layer)} else {before.top_layer()};
+        st.history.set_current_layers(photocraft_engine::LayerTarget {active: previous_layer, selected: previous_layer.into_iter().collect()});
+        st.history.record("Edit Type", Arc::new(before), photocraft_engine::LayerTarget {active: Some(layer), selected: vec![layer]});
+        st.active_layer = Some(layer);
+        st.selected_layers = vec![layer];
+        st.layer_anchor = Some(layer);
+        st.coalesce = Some(session.clone());
+        self.ui.text_edit = Some(crate::state::TextEdit {
+            layer: draft.layer, document: Some(st.doc.id.0), anchor: draft.anchor, caret: draft.caret, session,
+            created: draft.created, mask: draft.mask, dragging: false, resize: None, preedit: None,
+        });
+        self.ui.tool = match (orientation, draft.mask) {
+            (photocraft_doc::text::Orientation::Vertical, true) => crate::state::Tool::VerticalTypeMask,
+            (photocraft_doc::text::Orientation::Vertical, false) => crate::state::Tool::VerticalType,
+            (_, true) => crate::state::Tool::HorizontalTypeMask,
+            _ => crate::state::Tool::Type,
+        };
+        Ok(())
     }
 
     pub(super) fn submit_account_save(&mut self, path: String, bytes: Vec<u8>, warnings: Vec<String>) -> Result<(), String> {

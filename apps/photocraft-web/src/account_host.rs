@@ -4,7 +4,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
 use photocraft_doc::DocId;
-use photocraft_ui_egui::{AccountDialogFn, AccountDialogRequest, AccountSaveFn, AccountSaveRequest, FileDialogAnswer, FileDialogReply, PhotocraftApp};
+use photocraft_ui_egui::{AccountDialogFn, AccountDialogRequest, AccountProjectState, AccountSaveFn, AccountSaveRequest, FileDialogAnswer, FileDialogReply, PhotocraftApp};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use web_sys::{MessageEvent, Window};
 
@@ -125,6 +125,7 @@ struct Exchange {
     close: Option<CloseRequest>,
     close_approved: bool,
     recovery: Option<RecoveryRequest>,
+    project_state: Option<AccountProjectState>,
 }
 
 struct RecoveryRequest {
@@ -388,6 +389,28 @@ impl AccountHost {
             Err(error) => put(&message, "message", error)?,
         }
         self.parent.send(&message, &transfer)
+    }
+
+    pub fn publish_project_state(&self, app: &PhotocraftApp) -> Result<(), String> {
+        let mut exchange = self.exchange.borrow_mut();
+        if !exchange.started || exchange.close_approved {
+            return Ok(());
+        }
+        let state = app.account_project_state();
+        if state == exchange.project_state {
+            return Ok(());
+        }
+        let message = packet("photocraft:account-project-state")?;
+        put(&message, "available", state.is_some())?;
+        if let Some(state) = state {
+            put(&message, "documentId", state.document.0.to_string())?;
+            put(&message, "revision", state.revision.to_string())?;
+            put(&message, "dirty", state.dirty)?;
+            put(&message, "capturable", state.capturable)?;
+        }
+        self.parent.send(&message, &Array::new())?;
+        exchange.project_state = state;
+        Ok(())
     }
 
     pub fn apply_save_result(&self, app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
