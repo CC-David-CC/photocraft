@@ -161,6 +161,7 @@ impl PhotocraftApp {
         self.drag.is_some()
             || self.live_stroke.is_some()
             || include_type && self.ui.text_edit.is_some()
+            || self.account_save.editor_context.as_ref().is_some_and(crate::layer_row_ui::rename_active)
             || self.type_box_preview.is_some()
             || self.type_transform_preview.is_some()
             || self.session.documents().iter().any(|state| state.floating.is_some())

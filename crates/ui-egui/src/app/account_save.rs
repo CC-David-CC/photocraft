@@ -1,6 +1,6 @@
 //! Account writes settle separately from encoding and transport dispatch.
 
-use photocraft_doc::{DocId, Document, LayerContent, LayerId, TextLayer};
+use photocraft_doc::{DocId, Document, LayerContent, LayerId, SmartSource, TextLayer};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -8,6 +8,16 @@ use crate::{PhotocraftApp, dialogs::discard_ui};
 
 const TYPE_DRAFT: &[u8] = b"PCDRAFT1";
 const TYPE_DRAFT_HEADER: usize = 16;
+
+const EXTERNAL_ASSET_WARNING: &str = "This project references a file outside the browser. Use Layer → Smart Objects → Replace Contents to embed a copy in the project.";
+
+fn account_external_asset_warning(doc: &Document) -> Option<String> {
+    doc.walk().into_iter().any(|(_, _, layer)| {
+        matches!(&layer.content, LayerContent::Smart(smart)
+            if matches!(&smart.source, SmartSource::Linked { path }
+                if photocraft_io::linked::embedded_payload(&doc.metadata, path).is_none()))
+    }).then(|| EXTERNAL_ASSET_WARNING.to_owned())
+}
 
 /// Exact native state observed by the browser journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +132,7 @@ struct Pending {
 pub(crate) struct AccountSaveState {
     last_ticket: u64,
     pending: Option<Pending>,
+    pub(crate) editor_context: Option<egui::Context>,
     pub(crate) close_approved: bool,
 }
 
@@ -132,6 +143,11 @@ impl AccountSaveState {
 }
 
 impl PhotocraftApp {
+    /// Hosted lifecycle and command checks also cover text fields owned by egui.
+    pub fn set_account_editor_context(&mut self, ctx: &egui::Context) {
+        self.account_save.editor_context = Some(ctx.clone());
+    }
+
     pub fn account_project_state(&self) -> Option<AccountProjectState> {
         if self.services.account_save.is_none() || self.session.documents().len() != 1 {
             return None;
@@ -190,10 +206,11 @@ impl PhotocraftApp {
                 let layer = args.get("layerId").and_then(|id| id.as_str()).and_then(|id| id.parse::<u64>().ok())
                     .and_then(|id| live.doc.layer(LayerId(id))).ok_or("Unknown PhotoCraft layer")?;
                 let name = args.get("name").and_then(|name| name.as_str())
-                    .filter(|name| !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control))
+                    .filter(|name| name.len() <= 256 && !name.chars().any(char::is_control))
+                    .map(str::trim).filter(|name| !name.is_empty())
                     .ok_or("Choose a valid PhotoCraft layer name")?;
                 let layer = layer.id;
-                self.run("layer.renameLayer", json!({"layer":layer.0,"name":name}))?;
+                self.run("layer.setProps", json!({"layer":layer.0,"name":name}))?;
                 let revision = self.session.active().ok_or("The PhotoCraft document closed")?.revision;
                 Ok(json!({"layerId":layer.0.to_string(),"name":name,"revision":revision.to_string()}))
             }
@@ -253,7 +270,8 @@ impl PhotocraftApp {
             let mut doc = photocraft_format::load_from_bytes(bytes).map_err(|error| error.to_string())?;
             let name = crate::file_open::display_name(path);
             doc.name.clone_from(&name);
-            let warnings = crate::file_open::with_missing_fonts_of(&doc, photocraft_io::open_warnings(&doc));
+            let mut warnings = crate::file_open::with_missing_fonts_of(&doc, photocraft_io::open_warnings(&doc));
+            warnings.extend(account_external_asset_warning(&doc));
             let status = crate::i18n::fmt(tl!("Opened {name}"), &[("name", &name)]);
             self.session.add_document(doc, Some(path.to_owned()));
             self.sync_views();
@@ -301,7 +319,12 @@ impl PhotocraftApp {
         }
         let state = self.session.active_mut().ok_or("The PhotoCraft import is unavailable")?;
         state.saved_revision = 0;
-        Ok(Some((state.doc.id, state.revision)))
+        let admitted = (state.doc.id, state.revision);
+        if let Some(warning) = account_external_asset_warning(&state.doc) {
+            let status = self.ui.status.clone();
+            crate::notices::io_warnings(self, &status, &[warning]);
+        }
+        Ok(Some(admitted))
     }
 
     /// Encode a browser-local recovery snapshot without saving the editor or
@@ -334,7 +357,8 @@ impl PhotocraftApp {
         if let Some(path) = path {
             doc.name = crate::file_open::display_name(path);
         }
-        let warnings = crate::file_open::with_missing_fonts_of(&doc, photocraft_io::open_warnings(&doc));
+        let mut warnings = crate::file_open::with_missing_fonts_of(&doc, photocraft_io::open_warnings(&doc));
+        warnings.extend(account_external_asset_warning(&doc));
         let index = self.session.add_document(doc, path.map(str::to_owned));
         let state = self.session.active_mut().ok_or("PhotoCraft did not restore the project")?;
         state.saved_revision = 0;

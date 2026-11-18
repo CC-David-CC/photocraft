@@ -80,7 +80,42 @@ fn account_import_uses_the_native_decoder_without_a_saved_binding() {
 }
 
 #[test]
-fn account_operation_uses_the_native_layer_identity_and_protects_active_type() {
+fn account_linked_asset_can_be_replaced_with_embedded_contents() {
+    use photocraft_doc::{LayerContent, SmartSource};
+    use std::sync::Arc;
+
+    let mut source = app();
+    let png = photocraft_io::export(&source.session.active().unwrap().doc, "art.png", &Default::default()).unwrap().bytes;
+    source.place_bytes("art.png", png.clone(), Some("/legacy/graphics/art.png".into())).unwrap();
+    let original = source.session.active().unwrap();
+    let layer_id = original.active_layer.unwrap();
+    let LayerContent::Smart(smart) = &original.doc.layer(layer_id).unwrap().content else { panic!("expected a linked smart object") };
+    let placement = smart.placement_json();
+    assert!(smart.cache.is_some());
+    let project = photocraft_format::save_to_bytes(&original.doc, &Default::default()).unwrap();
+
+    let mut editor = PhotocraftApp::new(Session::new(), Services { account_save: Some(Box::new(|_, _| Ok(()))), ..Default::default() });
+    editor.start_account_document(Some(("Pictures/Legacy.pcraft", &project)), None).unwrap();
+    assert!(editor.ui.status.contains("Replace Contents"));
+    assert!(!editor.ui.status.contains("/legacy/graphics"));
+    let open = editor.session.active().unwrap();
+    assert!(!open.is_dirty());
+    let LayerContent::Smart(linked) = &open.doc.layer(layer_id).unwrap().content else { panic!("expected preserved linked layer") };
+    assert!(linked.cache.is_some());
+    assert_eq!(linked.placement_json(), placement);
+
+    photocraft_engine::smart_cmds::replace_contents_bytes(&mut editor.session, layer_id, "art.png", png.clone()).unwrap();
+    let edited = editor.session.active().unwrap();
+    assert!(edited.is_dirty());
+    let saved = photocraft_format::save_to_bytes(&edited.doc, &Default::default()).unwrap();
+    let recovered = photocraft_format::load_from_bytes(&saved).unwrap();
+    let LayerContent::Smart(portable) = &recovered.layer(layer_id).unwrap().content else { panic!("expected embedded coverage") };
+    assert_eq!(portable.source, SmartSource::Embedded {file_name: "art.png".into(), bytes: Arc::new(png)});
+    assert_eq!(portable.placement_json(), placement);
+}
+
+#[test]
+fn account_operation_uses_the_native_layer_identity_and_protects_active_edits() {
     let mut editor = app();
     editor.services.account_save = Some(Box::new(|_, _| Ok(())));
     let live = editor.session.active().unwrap();
@@ -88,11 +123,21 @@ fn account_operation_uses_the_native_layer_identity_and_protects_active_type() {
     let layer = live.active_layer.unwrap();
     let state = editor.execute_account_operation(document, None, "document.inspect", json!({})).unwrap();
     assert!(state["layers"].as_array().unwrap().iter().any(|entry| entry["id"] == layer.0.to_string()));
-    let rename = json!({"layerId":layer.0.to_string(),"name":"Approved rename"});
+    let rename = json!({"layerId":layer.0.to_string(),"name":" Approved rename "});
     assert!(editor.execute_account_operation(document, Some("Pictures/Other.pcraft"), "layer.rename", rename.clone()).is_err());
     assert!(editor.execute_account_operation(document, None, "layer.delete", rename.clone()).is_err());
     editor.execute_account_operation(document, None, "layer.rename", rename.clone()).unwrap();
     assert_eq!(editor.session.active().unwrap().doc.layer(layer).unwrap().name,"Approved rename");
+
+    let ctx = egui::Context::default();
+    editor.set_account_editor_context(&ctx);
+    crate::layer_row_ui::start_rename(&ctx, layer.0, "Approved rename");
+    let state = editor.account_project_state().unwrap();
+    assert!(state.unfinished_edit && !state.capturable && !state.autosave_eligible);
+    assert!(editor.request_account_close(true).is_err());
+    assert!(editor.execute_account_operation(document, None, "layer.rename", rename).unwrap_err().contains("Finish the active"));
+    crate::layer_row_ui::end_rename(&ctx, false);
+    assert!(!editor.account_project_state().unwrap().unfinished_edit);
 
     editor.run("type.create", json!({"text":"Human edit","x":1,"y":1})).unwrap();
     crate::type_tool::edit_active(&mut editor).unwrap();

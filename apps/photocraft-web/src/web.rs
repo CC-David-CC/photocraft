@@ -138,6 +138,9 @@ pub fn start() {
                         None
                     };
                     let mut app = PhotocraftApp::new(session, services);
+                    if host.is_some() {
+                        app.set_account_editor_context(&cc.egui_ctx);
+                    }
                     if !preset_warnings.is_empty() {
                         photocraft_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
                     }
