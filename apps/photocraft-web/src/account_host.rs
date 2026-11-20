@@ -464,9 +464,9 @@ impl AccountHost {
         self.parent.send(&message, &Array::new())
     }
 
-    /// Tick before native input and again after the prompt has drawn.
-    /// Once approved, stop running the embedded editor until its owner removes it.
-    pub fn apply_close(&self, app: &mut PhotocraftApp, browser_work_pending: impl Fn() -> bool) -> Result<bool, String> {
+    /// Start a close only after the editor has processed the current frame's input and focus.
+    /// An existing prompt can settle before input, for example after a save acknowledgement.
+    pub fn apply_close(&self, app: &mut PhotocraftApp, ctx: &egui::Context, after_ui: bool, browser_work_pending: impl Fn() -> bool) -> Result<bool, String> {
         let mut exchange = self.exchange.borrow_mut();
         if exchange.close_approved {
             return Ok(true);
@@ -475,12 +475,21 @@ impl AccountHost {
         let outcome = if close.started {
             app.account_close_outcome().map(Ok)
         } else {
+            if !after_ui {
+                return Ok(false);
+            }
             close.started = true;
             if browser_work_pending() {
                 Some(Err("Wait for the current PhotoCraft browser operation to finish.".into()))
             } else {
                 match app.request_account_close(close.interactive) {
-                    Ok(()) => app.account_close_outcome().map(Ok),
+                    Ok(()) => {
+                        let outcome = app.account_close_outcome().map(Ok);
+                        if outcome.is_none() {
+                            ctx.request_repaint();
+                        }
+                        outcome
+                    }
                     Err(error) => Some(Err(error)),
                 }
             }

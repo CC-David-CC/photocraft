@@ -422,10 +422,10 @@ struct WebShell {
 }
 
 impl WebShell {
-    fn closing(&mut self, ctx: &egui::Context) -> bool {
+    fn closing(&mut self, ctx: &egui::Context, after_ui: bool) -> bool {
         let Some(host) = self.host.as_ref() else { return false };
         let pending = || browser_work_pending(ctx, &self.drop_reads, &self.inbox, &self.place_inbox, &self.presets);
-        match host.apply_close(&mut self.app, pending) {
+        match host.apply_close(&mut self.app, ctx, after_ui, pending) {
             Ok(closing) => closing,
             Err(error) => {
                 log::warn!("PhotoCraft could not report its account close result: {error}");
@@ -546,7 +546,7 @@ impl eframe::App for WebShell {
                 log::warn!("PhotoCraft could not report its account save result: {error}");
             }
         }
-        if self.closing(ctx) {
+        if self.closing(ctx, false) {
             return;
         }
         if let Some(host) = self.host.as_ref()
@@ -628,7 +628,7 @@ impl eframe::App for WebShell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if self.host.as_ref().is_some_and(AccountHost::session_suspended) || self.closing(ui.ctx()) {
+        if self.host.as_ref().is_some_and(AccountHost::session_suspended) || self.closing(ui.ctx(), false) {
             return;
         }
         // Only while a change is unsaved. Storage the browser denies from the start (a
@@ -675,7 +675,7 @@ impl eframe::App for WebShell {
         }
         self.app.ui_frame(ui, frame);
         self.save_presets(ui.ctx());
-        if !self.closing(ui.ctx())
+        if !self.closing(ui.ctx(), true)
             && let Some(host) = self.host.as_ref()
             && let Err(error) = host.publish_project_state(
                 &self.app,
