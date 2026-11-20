@@ -161,6 +161,8 @@ pub(crate) struct AccountSaveState {
     pub(super) document: Option<DocId>,
     recovery_revision: RefCell<RecoveryRevision>,
     pub(crate) editor_context: Option<egui::Context>,
+    pub(crate) type_editor_id: Option<egui::Id>,
+    pub(crate) composing_type_session: Option<String>,
     pub(crate) close_approved: bool,
 }
 
@@ -174,6 +176,12 @@ impl PhotocraftApp {
     /// Hosted lifecycle and command checks also cover text fields owned by egui.
     pub fn set_account_editor_context(&mut self, ctx: &egui::Context) {
         self.account_save.editor_context = Some(ctx.clone());
+    }
+
+    pub(crate) fn account_type_composing(&self) -> bool {
+        self.ui.text_edit.as_ref().is_some_and(|edit| {
+            self.account_save.composing_type_session.as_deref() == Some(edit.session.as_str())
+        })
     }
 
     fn account_type_tab(&self, edit: &crate::state::TextEdit) -> Option<DocId> {
@@ -195,7 +203,7 @@ impl PhotocraftApp {
         let operation_pending = multiple || self.saving() || !self.session.jobs().is_empty() || self.file_dialog_open() || self.discard.is_some();
         let unfinished_edit = other_edit || self.ui.text_edit.is_some();
         let type_can_recover = self.ui.text_edit.as_ref().is_none_or(|edit| {
-            if edit.preedit.is_some() || edit.dragging || edit.resize.is_some() { return false; }
+            if self.account_type_composing() { return false; }
             let target = self.account_type_tab(edit);
             documents.iter().any(|tab| Some(tab.doc.id) == target
                 && tab.coalesce.as_deref() == Some(edit.session.as_str()) && tab.history.can_undo())
@@ -323,7 +331,7 @@ impl PhotocraftApp {
         } else {
             self.run("file.new", new_settings.unwrap_or_else(|| serde_json::json!({})))?;
             if let Some(index) = self.session.active_index() {
-                self.ui.views[index].fit_pending = true;
+                self.ui.views[index].place(craft::ui::canvas::ViewCommands::FitOnScreen);
             }
         }
         let state = self.session.active().ok_or("PhotoCraft did not open a document")?;
@@ -346,7 +354,7 @@ impl PhotocraftApp {
 
     pub(super) fn account_import_pending(&self) -> bool {
         !self.jobs.opens.is_empty() || !self.held_opens.is_empty() || !self.held_memory_prompts.is_empty()
-            || self.camera_raw.is_some() || !self.raw_shelf.is_empty()
+            || self.raw.is_some() || !self.raw_shelf.is_empty() || !self.raw_redevelop.is_empty()
     }
 
     /// Report only a finished native import. Its library bytes have no account
@@ -423,7 +431,7 @@ impl PhotocraftApp {
             let orientation = text.orientation;
             self.restore_account_type(before, draft, orientation)?;
         }
-        self.ui.views[index].fit_pending = true;
+        self.ui.views[index].place(craft::ui::canvas::ViewCommands::FitOnScreen);
         let status = "Recovered PhotoCraft project from this browser";
         self.ui.status = status.into();
         self.ui.status_error = false;
@@ -487,7 +495,7 @@ impl PhotocraftApp {
         st.coalesce = Some(session.clone());
         self.ui.text_edit = Some(crate::state::TextEdit {
             layer: draft.layer, document: Some(st.doc.id.0), anchor: draft.anchor, caret: draft.caret, session,
-            created: draft.created, mask: draft.mask, dragging: false, resize: None, preedit: None,
+            created: draft.created, mask: draft.mask,
         });
         self.ui.tool = match (orientation, draft.mask) {
             (photocraft_doc::text::Orientation::Vertical, true) => crate::state::Tool::VerticalTypeMask,

@@ -149,7 +149,7 @@ fn account_state_keeps_dirty_smart_object_work_bound_to_the_project() {
     editor.run("layer.new.layer", json!({"name":"Second nested edit"})).unwrap();
     assert!(editor.capture_account_recovery(root, state.recovery_revision).is_err());
     let text_layer = editor.run("type.create", json!({"text":"Before","x":1,"y":2})).unwrap()["layer"].as_u64().unwrap();
-    crate::type_tool::edit_active(&mut editor).unwrap();
+    crate::type_tool::edit_active(&mut editor, &ctx).unwrap();
     let group = editor.ui.text_edit.as_ref().unwrap().session.clone();
     editor.run("type.edit", json!({"layer":text_layer,"text":"Pending","coalesce":group})).unwrap();
     let state = editor.account_project_state().unwrap();
@@ -220,16 +220,16 @@ fn account_operation_uses_the_native_layer_identity_and_protects_active_edits() 
 
     let ctx = egui::Context::default();
     editor.set_account_editor_context(&ctx);
-    crate::layer_row_ui::start_rename(&ctx, layer.0, "Approved rename");
+    editor.layers_rename = Some(layer);
     let state = editor.account_project_state().unwrap();
     assert!(state.unfinished_edit && !state.capturable && !state.autosave_eligible);
     assert!(editor.request_account_close(true).is_err());
     assert!(editor.execute_account_operation(document, None, "layer.rename", rename).unwrap_err().contains("Finish the active"));
-    crate::layer_row_ui::end_rename(&ctx, false);
+    editor.layers_rename = None;
     assert!(!editor.account_project_state().unwrap().unfinished_edit);
 
     editor.run("type.create", json!({"text":"Human edit","x":1,"y":1})).unwrap();
-    crate::type_tool::edit_active(&mut editor).unwrap();
+    crate::type_tool::edit_active(&mut editor, &ctx).unwrap();
     let changed = json!({"layerId":layer.0.to_string(),"name":"Blocked rename"});
     assert!(editor.execute_account_operation(document, None, "layer.rename", changed).unwrap_err().contains("Finish the active"));
     assert_eq!(editor.session.active().unwrap().doc.layer(layer).unwrap().name,"Approved rename");

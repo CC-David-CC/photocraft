@@ -158,10 +158,15 @@ impl PhotocraftApp {
     }
 
     pub(crate) fn account_edit_in_progress(&self, include_type: bool) -> bool {
-        self.drag.is_some()
+        let ctx = self.account_save.editor_context.as_ref().unwrap_or_else(|| self.ctx());
+        let other_text_editor = craft::ui::runtime::focus::focused_rec(ctx).is_some_and(|focus| {
+            focus.stop.text && !focus.stop.press_only
+                && (self.ui.text_edit.is_none() || Some(focus.stop.id) != self.account_save.type_editor_id)
+        });
+        ctx.input(|input| input.pointer.any_down())
             || self.live_stroke.is_some()
             || include_type && self.ui.text_edit.is_some()
-            || self.account_save.editor_context.as_ref().is_some_and(crate::layer_row_ui::rename_active)
+            || (self.layers_rename.is_some() || other_text_editor)
             || self.type_box_preview.is_some()
             || self.type_transform_preview.is_some()
             || self.session.documents().iter().any(|state| state.floating.is_some())
@@ -170,12 +175,11 @@ impl PhotocraftApp {
             || !self.remove_pending.is_empty()
             || crate::crop_ui::pending(self)
             || crate::perspective_crop_ui::pending(self)
-            || !self.ui.dialogs.is_empty()
+            || !self.framework.dialogs.open_dialogs().is_empty()
             || self.save_options_open()
             || self.distort.active()
-            || self.distort.gallery.is_some()
             || self.smart_svg.modal_open()
-            || self.camera_raw.is_some()
+            || self.raw.is_some()
             || self.wide_angle.is_some()
             || crate::gradient_ui::editing(self)
     }

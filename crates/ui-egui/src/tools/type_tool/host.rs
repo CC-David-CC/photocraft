@@ -66,7 +66,18 @@ impl TextEditorHost for LayerHost<'_> {
     fn replace(&mut self, range: Range<usize>, text: &str, kind: EditKind) -> bool {
         // A free transform in progress commits before the text changes under it.
         crate::type_transform::finish(self.app);
-        insertion_style::replace(self.app, range.start, range.end, text, kind)
+        let replaced = insertion_style::replace(self.app, range.start, range.end, text, kind);
+        if replaced && self.app.services.account_save.is_some() {
+            match kind {
+                EditKind::Composing => {
+                    self.app.account_save.composing_type_session = self.app.ui.text_edit.as_ref()
+                        .filter(|_| !text.is_empty()).map(|edit| edit.session.clone());
+                }
+                EditKind::Committed | EditKind::Typed | EditKind::Pasted => self.app.account_save.composing_type_session = None,
+                _ => {}
+            }
+        }
+        replaced
     }
 
     fn hit(&mut self, at: Point) -> (usize, usize) {

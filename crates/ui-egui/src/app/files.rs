@@ -625,7 +625,7 @@ impl PhotocraftApp {
     }
 
     fn check_account_save_composition(&self) -> Result<(), String> {
-        if self.services.account_save.is_some() && self.ui.text_edit.as_ref().is_some_and(|edit| edit.preedit.is_some()) {
+        if self.services.account_save.is_some() && self.account_type_composing() {
             return Err(tl!("Finish or cancel the text composition before saving.").into());
         }
         Ok(())

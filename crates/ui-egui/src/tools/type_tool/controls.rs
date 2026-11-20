@@ -213,6 +213,9 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &craft::behavior::Ca
         }
         editor.show_at(ui, rect)
     };
+    if app.services.account_save.is_some() {
+        app.account_save.type_editor_id = Some(out.response.id);
+    }
     super::editing::take_editor_focus(ui.ctx());
     if let Some(ed) = app.ui.text_edit.as_mut() {
         (ed.anchor, ed.caret) = (selection.anchor, selection.caret);
