@@ -489,8 +489,8 @@ impl PhotocraftApp {
         let previous_layer = if before.layer(layer).is_some() {Some(layer)} else {before.top_layer()};
         st.history.set_current_layers(photocraft_engine::LayerTarget {active: previous_layer, selected: previous_layer.into_iter().collect()});
         st.history.record("Edit Type", Arc::new(before), photocraft_engine::LayerTarget {active: Some(layer), selected: vec![layer]});
-        st.active_layer = Some(layer);
-        st.selected_layers = vec![layer];
+        st.set_active_layer(Some(layer));
+        *st.selection_mut() = vec![layer];
         st.layer_anchor = Some(layer);
         st.coalesce = Some(session.clone());
         self.ui.text_edit = Some(crate::state::TextEdit {
