@@ -396,6 +396,24 @@ pub(crate) fn take(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
         None => {}
     }
+    // Keep the WebOS keyboard choices on the framework dialog. Only handle a
+    // key once the question is open for this document, through its normal reply path.
+    #[cfg(target_arch = "wasm32")]
+    if app.discard.as_ref().is_some_and(|p| p.id == ACCOUNT_CLOSE && p.asked == Some(doc))
+        && let Some(id) = host_id(app)
+    {
+        let choice = ctx.input_mut(|input| {
+            [(egui::Key::Y, CloseAnswer::Save), (egui::Key::N, CloseAnswer::DontSave), (egui::Key::C, CloseAnswer::Cancel)]
+                .into_iter()
+                .find_map(|(key, answer)| input.consume_key(egui::Modifiers::NONE, key).then_some(answer))
+        });
+        if let Some(choice) = choice
+            && let Some(dialog) = app.framework.dialogs.get_mut_by_id::<UnsavedChangesDialog>(id)
+        {
+            dialog.set_answer(choice);
+            app.framework.dialogs.confirm_by_id(ctx, id);
+        }
+    }
     // The answer of the open question. The host reports `Cancel` only for a question it closed from
     // outside (a control client's cancel): the client wants the prompt dropped like Esc would.
     let result = match app.framework.dialogs.take::<UnsavedChangesDialog>() {
