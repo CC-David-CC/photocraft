@@ -157,6 +157,12 @@ impl PhotocraftApp {
         Ok(())
     }
 
+    /// Register the hosted question before the next frame receives keyboard input.
+    #[cfg(target_arch = "wasm32")]
+    pub fn show_account_close_question(&mut self, ctx: &egui::Context) {
+        take(self, ctx);
+    }
+
     pub(crate) fn account_edit_in_progress(&self, include_type: bool) -> bool {
         let ctx = self.account_save.editor_context.as_ref().unwrap_or_else(|| self.ctx());
         let other_text_editor = craft::ui::runtime::focus::focused_rec(ctx).is_some_and(|focus| {

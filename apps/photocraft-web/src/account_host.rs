@@ -234,6 +234,7 @@ impl RecoveryRequest {
 struct CloseRequest {
     id: String,
     interactive: bool,
+    waited_for_edit: bool,
     started: bool,
 }
 
@@ -342,7 +343,7 @@ impl AccountHost {
                         && let Some(id) = request_id(&data)
                         && let Some(interactive) = field(&data, "interactive").and_then(|value| value.as_bool())
                     {
-                        inbox.close = Some(CloseRequest { id, interactive, started: false });
+                        inbox.close = Some(CloseRequest { id, interactive, waited_for_edit: false, started: false });
                         wake.request_repaint();
                     }
                     return;
@@ -478,6 +479,13 @@ impl AccountHost {
             if !after_ui {
                 return Ok(false);
             }
+            if !close.waited_for_edit && app.account_project_state().is_some_and(|state| state.unfinished_edit) {
+                // A committed text field can keep framework focus through the end of this pass.
+                // Recheck once after the next pass. The normal guard still rejects any live edit.
+                close.waited_for_edit = true;
+                ctx.request_repaint();
+                return Ok(false);
+            }
             close.started = true;
             if browser_work_pending() {
                 Some(Err("Wait for the current PhotoCraft browser operation to finish.".into()))
@@ -486,6 +494,7 @@ impl AccountHost {
                     Ok(()) => {
                         let outcome = app.account_close_outcome().map(Ok);
                         if outcome.is_none() {
+                            app.show_account_close_question(ctx);
                             ctx.request_repaint();
                         }
                         outcome
