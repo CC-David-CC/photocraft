@@ -240,6 +240,28 @@ pub(crate) fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: &str) {
 /// once, when it commits: the area's `edit` says whether its gesture is still running.
 pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, panels_hidden: bool) {
     let ctx = ui.ctx().clone();
+    // Present the same document and saved workspace at every size. A narrow window opens
+    // onto the image and can bring its regular panels back with a single touch.
+    let compact = ui.available_width() < 540.0;
+    if compact {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.max(36.0);
+            let label = if app.ui.compact_panels_open { tl!("Hide panels") } else { tl!("Show panels") };
+            if ui.button(label).clicked() {
+                app.ui.compact_panels_open = !app.ui.compact_panels_open;
+            }
+            for (label, command) in [(tl!("Fit"), "view.fitOnScreen"), (tl!("Zoom out"), "view.zoomOut"), (tl!("Zoom in"), "view.zoomIn")] {
+                if ui.button(label).clicked() {
+                    if let Err(error) = crate::menus::invoke(app, &ctx, command, json!({})) {
+                        app.ui.status = error.to_string();
+                    }
+                }
+            }
+        });
+    } else {
+        app.ui.compact_panels_open = false;
+    }
+    let panels_hidden = panels_hidden || (compact && !app.ui.compact_panels_open);
     let workspace = app.ui.docking.clone();
     let locked = app.workspaces.set.locked;
     let auto_collapse = app.session.prefs().workspace.auto_collapse_icon_panels;

@@ -372,6 +372,9 @@ pub struct UiState {
     /// docks back to.
     #[serde(default = "crate::panels::registry::default_workspace")]
     pub docking: craft::behavior::dock::Workspace<String>,
+    /// Show the regular workspace temporarily in a narrow window.
+    #[serde(skip)]
+    pub compact_panels_open: bool,
     /// The panel open in the flyout of a column collapsed to icons (`Layout::opens_in_flyout`); the dock area shows it.
     /// Not saved: a flyout is closed at launch.
     #[serde(skip)]
@@ -522,6 +525,7 @@ impl Default for UiState {
             theme: crate::theme::AppTheme::default(),
             palette: Default::default(),
             docking: crate::panels::registry::default_workspace(),
+            compact_panels_open: false,
             flyout: None,
             color_panel: Default::default(),
             color_panel_synced: None,
